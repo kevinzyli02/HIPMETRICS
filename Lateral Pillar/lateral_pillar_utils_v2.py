@@ -40,17 +40,19 @@ def compute_lateral_pillar(mask: np.ndarray, filename: str, image: np.ndarray = 
     width = x_max - x_min
     third_width = width / 3
 
+    # Get x position of the cutoff line at the lateral third
     if is_left:
-        lat_x_min = x_max - third_width
-        lat_x_max = x_max
+        lateral_x = x_max - third_width
     else:
-        lat_x_min = x_min
-        lat_x_max = x_min + third_width
+        lateral_x = x_min + third_width
 
-    lateral_mask_indices = (x_rot >= lat_x_min) & (x_rot < lat_x_max)
-    y_lateral = y_rot[lateral_mask_indices]
-    actual_lateral_height = np.max(y_lateral) - np.min(y_lateral) if len(y_lateral) > 0 else 0
+    # Select mask points within a small vertical band (~2px width) around lateral_x
+    band_width = 1.0  # adjust if needed
+    band_indices = np.where(np.abs(x_rot - lateral_x) <= band_width)[0]
+    y_band = y_rot[band_indices]
+    actual_lateral_height = np.max(y_band) - np.min(y_band) if len(y_band) > 0 else 0
 
+    # Same for restored mask
     if restored_mask is not None:
         ys_restored, xs_restored = np.where(restored_mask > 0)
         coords_restored = np.column_stack((xs_restored, ys_restored))
@@ -59,15 +61,15 @@ def compute_lateral_pillar(mask: np.ndarray, filename: str, image: np.ndarray = 
 
         x_rot_rest = rotated_coords_restored[:, 0]
         y_rot_rest = rotated_coords_restored[:, 1]
-
-        lateral_rest_indices = (x_rot_rest >= lat_x_min) & (x_rot_rest < lat_x_max)
-        y_lateral_rest = y_rot_rest[lateral_rest_indices]
-        restored_lateral_height = np.max(y_lateral_rest) - np.min(y_lateral_rest) if len(y_lateral_rest) > 0 else 1
+        band_rest_indices = np.where(np.abs(x_rot_rest - lateral_x) <= band_width)[0]
+        y_band_rest = y_rot_rest[band_rest_indices]
+        restored_lateral_height = np.max(y_band_rest) - np.min(y_band_rest) if len(y_band_rest) > 0 else 1
     else:
         restored_lateral_height = 1
 
     pillar_ratio = actual_lateral_height / restored_lateral_height if restored_lateral_height > 0 else 0.0
 
+    # ------------------------ Visualization Section ------------------------
     if visualize and image is not None:
         plt.figure(figsize=(6, 8), dpi=300)
         ax = plt.gca()
@@ -82,6 +84,7 @@ def compute_lateral_pillar(mask: np.ndarray, filename: str, image: np.ndarray = 
             for contour in contours_restored:
                 ax.plot(contour[:, 1], contour[:, 0], color='red', linewidth=1)
 
+        # Draw lateral third dividing lines
         thirds_x = [x_min + third_width, x_min + 2 * third_width]
         for x in thirds_x:
             p1 = np.array([x, -100])
@@ -90,28 +93,19 @@ def compute_lateral_pillar(mask: np.ndarray, filename: str, image: np.ndarray = 
             p2_global = (p2 @ rotation_matrix) + center
             ax.plot([p1_global[0], p2_global[0]], [p1_global[1], p2_global[1]], linestyle='--', color='cyan', linewidth=1.2)
 
-        # Draw bounding box over lateral third where height is measured
-        bbox_x = lat_x_min
-        bbox_width = third_width
-        bbox_y = np.min(y_lateral) if len(y_lateral) > 0 else 0
-        bbox_height = actual_lateral_height
-        bbox_origin = (bbox_x, bbox_y)
-        bbox_coords = np.array([
-            [bbox_x, bbox_y],
-            [bbox_x + bbox_width, bbox_y],
-            [bbox_x + bbox_width, bbox_y + bbox_height],
-            [bbox_x, bbox_y + bbox_height]
-        ])
-        bbox_coords_global = (bbox_coords @ rotation_matrix) + center
-        patch = plt.Polygon(bbox_coords_global, closed=True, edgecolor='yellow', fill=False, linewidth=2)
-        ax.add_patch(patch)
+        # Mark lateral_x vertical slice
+        p1 = np.array([lateral_x, -100])
+        p2 = np.array([lateral_x, 100])
+        p1_global = (p1 @ rotation_matrix) + center
+        p2_global = (p2 @ rotation_matrix) + center
+        ax.plot([p1_global[0], p2_global[0]], [p1_global[1], p2_global[1]], color='yellow', linestyle='-', linewidth=1.5)
 
         ax.set_title(f"{filename} | Lateral Pillar Ratio: {pillar_ratio:.2f}", color='black')
         legend_elements = [
             Patch(facecolor='white', edgecolor='white', label='Actual Mask'),
             Patch(facecolor='red', edgecolor='red', label='Restored Mask'),
-            Patch(facecolor='cyan', edgecolor='cyan', label='Lateral Thirds', linestyle='--'),
-            Patch(facecolor='none', edgecolor='yellow', label='Height Measurement Box')
+            Patch(facecolor='cyan', edgecolor='cyan', label='Lateral Thirds'),
+            Patch(facecolor='none', edgecolor='yellow', label='Height Slice Line')
         ]
         ax.legend(handles=legend_elements, loc='lower right')
         ax.axis('off')
@@ -126,6 +120,7 @@ def compute_lateral_pillar(mask: np.ndarray, filename: str, image: np.ndarray = 
         save_path = os.path.join(output_dir_final, f"{filename}_overlay.jpg")
         plt.savefig(save_path, format='jpg', bbox_inches='tight', pad_inches=0)
         plt.close()
+    # ------------------------------------------------------------------------
 
     return {
         'actual_lateral_height': actual_lateral_height,
