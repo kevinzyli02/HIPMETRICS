@@ -4,6 +4,9 @@ import matplotlib.pyplot as plt
 from skimage.measure import label, regionprops
 from scipy.optimize import minimize_scalar
 
+
+
+
 def rotate_image_and_mask(mask, angle):
     center = (mask.shape[1] // 2, mask.shape[0] // 2)
     rot_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
@@ -51,16 +54,18 @@ def restore_femoral_head_curved(mask, visualize_steps=True):
         raise ValueError("No region found in rotated mask.")
 
     minr, minc, maxr, maxc = props[0].bbox
-    mid_y = (minr + maxr) // 2
+    cutoff_ratio = 0.6  # Keep top 40%, use bottom 60%
+    cut_y = int(minr + (1 - cutoff_ratio) * (maxr - minr))
     lower_half = np.zeros_like(rotated)
-    lower_half[mid_y:maxr, minc:maxc] = rotated[mid_y:maxr, minc:maxc]
+    lower_half[cut_y:maxr, minc:maxc] = rotated[cut_y:maxr, minc:maxc]
+
+    cut_line_y = cut_y
 
     if visualize_steps:
         plt.subplot(1, 4, 3)
         plt.imshow(lower_half, cmap='gray')
         plt.title("Lower Half")
 
-    cut_line_y = mid_y
     cut_line_indices = np.argwhere(lower_half[cut_line_y, :] > 0)
     if cut_line_indices.size == 0:
         raise ValueError("No nonzero pixels found at cut line.")
