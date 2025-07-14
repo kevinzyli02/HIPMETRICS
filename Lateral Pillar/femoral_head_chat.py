@@ -54,7 +54,7 @@ def restore_femoral_head_curved(mask, visualize_steps=True):
         raise ValueError("No region found in rotated mask.")
 
     minr, minc, maxr, maxc = props[0].bbox
-    cutoff_ratio = 0.6  # Keep top 40%, use bottom 60%
+    cutoff_ratio = 0.5  # Keep top 40%, use bottom 60%
     cut_y = int(minr + (1 - cutoff_ratio) * (maxr - minr))
     lower_half = np.zeros_like(rotated)
     lower_half[cut_y:maxr, minc:maxc] = rotated[cut_y:maxr, minc:maxc]

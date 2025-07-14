@@ -1,354 +1,186 @@
-import os
 import json
-import numpy as np
+import os
 import cv2
+import numpy as np
 import matplotlib.pyplot as plt
-from scipy.ndimage import affine_transform
-from skimage.measure import label, regionprops
-from scipy.spatial import procrustes
-from scipy.spatial.distance import cdist
+from pycocotools.coco import COCO
+from pycocotools import mask as maskUtils
+from pathlib import Path
+
+# Define folder locations
+coco_path = r'C:\Users\SR207348\Downloads\labels_ipsg102_2025-06-30-08-40-52.json'
+image_dir = r'C:\Users\SR207348\Downloads\ipsg102\ipsg102'
+output_dir = r"C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\ipsg102_lateral_pillar"
 
 
-class FemoralMaskAligner:
-    def __init__(self, coco_path, image_dir, output_dir):
-        self.coco_path = coco_path
-        self.image_dir = image_dir
-        self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+def rotate_mask(mask, angle, center):
+    """Rotate mask around specified center point"""
+    rotation_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated_mask = cv2.warpAffine(mask.astype(np.uint8), rotation_mat,
+                                  (mask.shape[1], mask.shape[0]),
+                                  flags=cv2.INTER_NEAREST)
+    return rotated_mask > 0.5
 
-        # Load COCO data
-        with open(coco_path) as f:
-            self.coco_data = json.load(f)
 
-        # Create mappings
-        self._create_mappings()
-        self.head_cat_id = next(c['id'] for c in self.coco_data['categories']
-                                if c['name'].lower() == 'head')
+def align_epiphysis(mask):
+    """Rotate mask so epiphysis is oriented downward"""
+    # Find centroid
+    points = np.argwhere(mask)
+    if len(points) == 0:
+        return mask, (0, 0)
+    cy, cx = np.mean(points, axis=0)
 
-    def _create_mappings(self):
-        self.image_id_to_info = {img['id']: img for img in self.coco_data['images']}
-        self.annotations = {img_id: [] for img_id in self.image_id_to_info.keys()}
+    # Find farthest point from centroid (epiphysis)
+    vectors = points - np.array([cy, cx])
+    distances = np.linalg.norm(vectors, axis=1)
+    farthest_idx = np.argmax(distances)
+    fy, fx = points[farthest_idx]
 
-        for ann in self.coco_data['annotations']:
-            self.annotations[ann['image_id']].append(ann)
+    # Calculate rotation angle (align vector to vertical downward)
+    dx = fx - cx
+    dy = fy - cy
+    target_angle = np.degrees(np.arctan2(dx, dy))
 
-    def _parse_filename(self, filename):
-        parts = os.path.splitext(filename)[0].split('_')
-        return {
-            'patient': parts[1],
-            'view': parts[2],
-            'timepoint': parts[3],
-            'laterality': parts[5]
-        }
+    # Rotate mask
+    rotated = rotate_mask(mask, target_angle, (cx, cy))
+    return rotated, (cx, cy)
 
-    def _get_head_mask(self, img_id):
-        mask = np.zeros((self.image_id_to_info[img_id]['height'],
-                         self.image_id_to_info[img_id]['width']), dtype=np.uint8)
 
-        for ann in self.annotations.get(img_id, []):
-            if ann['category_id'] == self.head_cat_id:
-                seg = np.array(ann['segmentation'][0]).reshape(-1, 2)
-                cv2.fillPoly(mask, [seg.astype(int)], 1)
-        return mask
+def process_patient(patient_id, timepoint, view, coco, image_dir):
+    """Process left/right masks for a specific patient/timepoint/view"""
+    # Find matching annotations
+    anns = []
+    for img_id in coco.imgs:
+        img_info = coco.imgs[img_id]
+        filename = Path(img_info['file_name']).stem
+        parts = filename.split('_')
 
-    def _flip_mask(self, mask):
-        return np.fliplr(mask).copy()
+        if (parts[0] == f"Patient{patient_id}" and
+                parts[2] == timepoint and
+                parts[1] == view and
+                parts[-1] in ['L', 'R']):
+            ann_ids = coco.getAnnIds(imgIds=img_id)
+            for ann_id in ann_ids:
+                ann = coco.anns[ann_id]
+                if coco.cats[ann['category_id']]['name'] == 'femoral head':
+                    anns.append({
+                        'mask': coco.annToMask(ann),
+                        'laterality': parts[-1],
+                        'img_size': (img_info['width'], img_info['height'])
+                    })
 
-    def _dice_score(self, mask1, mask2):
-        """Custom Dice score implementation"""
-        mask1 = mask1.astype(bool)
-        mask2 = mask2.astype(bool)
-        intersection = np.logical_and(mask1, mask2)
-        return (2.0 * intersection.sum()) / (mask1.sum() + mask2.sum() + 1e-7)
+    # Process masks
+    results = {}
+    for ann in anns:
+        mask = ann['mask']
+        laterality = ann['laterality']
 
-    def _centroid_alignment(self, source, target):
-        src_props = regionprops(label(source))[0]
-        tgt_props = regionprops(label(target))[0]
-        return np.array([
-            [1, 0, tgt_props.centroid[1] - src_props.centroid[1]],
-            [0, 1, tgt_props.centroid[0] - src_props.centroid[0]],
-            [0, 0, 1]
-        ])
+        # Mirror left masks to match right orientation
+        if laterality == 'L':
+            mask = cv2.flip(mask, 1)
 
-    def _corner_alignment(self, source, target):
-        src_points = np.argwhere(source)
-        tgt_points = np.argwhere(target)
+        # Align epiphysis to bottom
+        aligned_mask, centroid = align_epiphysis(mask)
+        results[laterality] = {'mask': aligned_mask, 'centroid': centroid}
 
-        # Find rightmost-lowermost point
-        src_ref = src_points[np.lexsort((src_points[:, 1], -src_points[:, 0]))[0]]
-        tgt_ref = tgt_points[np.lexsort((tgt_points[:, 1], -tgt_points[:, 0]))[0]]
+    return results
 
-        return np.array([
-            [1, 0, tgt_ref[1] - src_ref[1]],
-            [0, 1, tgt_ref[0] - src_ref[0]],
-            [0, 0, 1]
-        ])
 
-    def _principal_axis_alignment(self, source, target):
-        """Align masks based on their principal axes"""
-        src_props = regionprops(label(source))[0]
-        tgt_props = regionprops(label(target))[0]
+def overlay_masks(left_data, right_data):
+    """Overlay left and right masks with centroids aligned"""
+    # Create blank canvas
+    canvas_size = 1500
+    canvas = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
+    center = (canvas_size // 2, canvas_size // 2)
 
-        # Get orientation angles
-        src_angle = src_props.orientation
-        tgt_angle = tgt_props.orientation
+    # Place masks
+    for i, data in enumerate([right_data, left_data]):
+        mask = data['mask']
+        cx, cy = data['centroid']
 
-        # Calculate rotation angle difference
-        rot_angle = tgt_angle - src_angle
+        # Calculate position
+        x_start = center[0] - cx
+        y_start = center[1] - cy
+        x_end = x_start + mask.shape[1]
+        y_end = y_start + mask.shape[0]
 
-        # Create rotation matrix
-        rot_mat = np.array([
-            [np.cos(rot_angle), -np.sin(rot_angle), 0],
-            [np.sin(rot_angle), np.cos(rot_angle), 0],
-            [0, 0, 1]
-        ])
+        # Clip coordinates
+        x1 = max(0, x_start)
+        y1 = max(0, y_start)
+        x2 = min(canvas_size, x_end)
+        y2 = min(canvas_size, y_end)
 
-        # Translate to centroids
-        translate_to_src = np.array([
-            [1, 0, -src_props.centroid[1]],
-            [0, 1, -src_props.centroid[0]],
-            [0, 0, 1]
-        ])
+        if x1 >= x2 or y1 >= y2:
+            continue
 
-        translate_to_tgt = np.array([
-            [1, 0, tgt_props.centroid[1]],
-            [0, 1, tgt_props.centroid[0]],
-            [0, 0, 1]
-        ])
+        # Extract mask region
+        mx1 = x1 - x_start
+        my1 = y1 - y_start
+        mx2 = mx1 + (x2 - x1)
+        my2 = my1 + (y2 - y1)
+        mask_region = mask[my1:my2, mx1:mx2]
 
-        # Combine transformations
-        return translate_to_tgt @ rot_mat @ translate_to_src
-
-    def _procrustes_alignment(self, source, target):
-        """Align using Procrustes analysis"""
-        src_points = np.argwhere(source)
-        tgt_points = np.argwhere(target)
-
-        # Sample points if too many
-        if len(src_points) > 1000:
-            src_points = src_points[np.random.choice(len(src_points), 1000, replace=False)]
-        if len(tgt_points) > 1000:
-            tgt_points = tgt_points[np.random.choice(len(tgt_points), 1000, replace=False)]
-
-        # Center points
-        src_center = np.mean(src_points, axis=0)
-        tgt_center = np.mean(tgt_points, axis=0)
-        src_points_centered = src_points - src_center
-        tgt_points_centered = tgt_points - tgt_center
-
-        # Compute rotation matrix
-        H = src_points_centered.T @ tgt_points_centered
-        U, _, Vt = np.linalg.svd(H)
-        R = Vt.T @ U.T
-
-        # Handle reflection case
-        if np.linalg.det(R) < 0:
-            Vt[-1, :] *= -1
-            R = Vt.T @ U.T
-
-        # Build transformation matrix
-        T = tgt_center - R @ src_center
-        return np.array([
-            [R[0, 0], R[0, 1], T[1]],
-            [R[1, 0], R[1, 1], T[0]],
-            [0, 0, 1]
-        ])
-
-    def _chamfer_alignment(self, source, target, iterations=20):
-        """Align using Chamfer distance minimization"""
-        # Create distance transform of target
-        target_dt = cv2.distanceTransform(
-            target.astype(np.uint8),
-            cv2.DIST_L2,
-            cv2.DIST_MASK_PRECISE
+        # Set color (right=red, left=green)
+        color = [0, 255, 0] if i == 1 else [255, 0, 0]
+        canvas[y1:y2, x1:x2, :] = np.where(
+            mask_region[..., None],
+            np.array(color, dtype=np.uint8),
+            canvas[y1:y2, x1:x2, :]
         )
 
-        # Get source points
-        src_points = np.argwhere(source)
-
-        # Initial transformation (centroid alignment)
-        M = self._centroid_alignment(source, target)
-        best_score = float('inf')
-        best_M = M
-
-        # Try random perturbations
-        for _ in range(iterations):
-            # Perturb transformation
-            perturb = np.eye(3)
-            perturb[0, 2] = np.random.uniform(-10, 10)
-            perturb[1, 2] = np.random.uniform(-10, 10)
-            perturb[0, 0] = 1 + np.random.uniform(-0.1, 0.1)
-            perturb[1, 1] = 1 + np.random.uniform(-0.1, 0.1)
-            perturb[0, 1] = np.random.uniform(-0.05, 0.05)
-            perturb[1, 0] = np.random.uniform(-0.05, 0.05)
-
-            test_M = perturb @ M
-
-            # Transform points
-            transformed_points = (test_M[:2, :2] @ src_points.T + test_M[:2, 2:3]).T
-
-            # Calculate chamfer distance
-            distances = cdist(transformed_points, np.argwhere(target))
-            min_distances = np.min(distances, axis=1)
-            score = np.mean(min_distances)
-
-            # Update best transformation
-            if score < best_score:
-                best_score = score
-                best_M = test_M
-
-        return best_M
-
-    def _rigid_alignment(self, source, target):
-        # Feature-based alignment using ORB
-        src_pts, tgt_pts = self._find_keypoints(source, target)
-
-        if len(src_pts) < 4:
-            return self._centroid_alignment(source, target)
-
-        M = cv2.estimateAffinePartial2D(src_pts, tgt_pts)[0]
-        if M is None:
-            return self._centroid_alignment(source, target)
-
-        # Convert to 3x3 homogeneous matrix
-        M_hom = np.vstack([M, [0, 0, 1]])
-        return M_hom
-
-    def _find_keypoints(self, source, target):
-        # Convert to uint8 for OpenCV
-        source_uint8 = (source * 255).astype(np.uint8)
-        target_uint8 = (target * 255).astype(np.uint8)
-
-        # Find keypoints and descriptors
-        orb = cv2.ORB_create()
-        kp1, des1 = orb.detectAndCompute(source_uint8, None)
-        kp2, des2 = orb.detectAndCompute(target_uint8, None)
-
-        if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
-            return [], []
-
-        # Match features
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        matches = bf.match(des1, des2)
-        matches = sorted(matches, key=lambda x: x.distance)[:10]
-
-        src_pts = np.float32([kp1[m.queryIdx].pt for m in matches])
-        tgt_pts = np.float32([kp2[m.trainIdx].pt for m in matches])
-
-        return src_pts, tgt_pts
-
-    def align_and_evaluate(self):
-        results = []
-
-        # Group images by patient, view, and timepoint
-        groups = {}
-        for img_info in self.coco_data['images']:
-            meta = self._parse_filename(img_info['file_name'])
-            key = (meta['patient'], meta['view'], meta['timepoint'])
-            groups.setdefault(key, {})[meta['laterality']] = img_info['id']
-
-        # Process each group
-        for (patient, view, timepoint), ids in groups.items():
-            if 'L' not in ids or 'R' not in ids:
-                continue
-
-            # Get masks
-            left_mask = self._get_head_mask(ids['L'])
-            right_mask = self._get_head_mask(ids['R'])
-
-            # Flip healthy mask (left)
-            healthy_flipped = self._flip_mask(left_mask)
-
-            # Alignment methods
-            methods = {
-                'Centroid': self._centroid_alignment,
-                'Corner': self._corner_alignment,
-                'PrincipalAxis': self._principal_axis_alignment,
-                'Procrustes': self._procrustes_alignment,
-                'Chamfer': lambda s, t: self._chamfer_alignment(s, t),
-                'Rigid': self._rigid_alignment
-            }
-
-            # Process each method
-            for method_name, align_func in methods.items():
-                try:
-                    # Get transformation matrix (3x3 homogeneous)
-                    M = align_func(healthy_flipped, right_mask)
-
-                    # Apply transformation
-                    aligned = affine_transform(
-                        healthy_flipped,
-                        M[:2, :2],  # rotation/scale
-                        offset=M[:2, 2],  # translation
-                        output_shape=right_mask.shape
-                    ) > 0.5
-
-                    # Calculate Dice score
-                    dice = self._dice_score(right_mask, aligned)
-
-                    # Visualize results
-                    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
-                    fig.suptitle(f"{method_name} Alignment (Dice: {dice:.3f})")
-
-                    ax[0].imshow(left_mask, cmap='gray')
-                    ax[0].set_title('Original Healthy (Left)')
-
-                    ax[1].imshow(right_mask, cmap='gray')
-                    ax[1].set_title('Affected (Right)')
-
-                    # Create color overlay
-                    overlay = np.zeros((*right_mask.shape, 3), dtype=np.uint8)
-                    overlay[..., 0] = right_mask.astype(np.uint8) * 255  # Red for affected
-                    overlay[..., 1] = aligned.astype(np.uint8) * 255  # Green for healthy
-
-                    ax[2].imshow(overlay)
-                    ax[2].set_title('Overlay (Green: Healthy, Red: Affected)')
-
-                    # Save results
-                    plt.tight_layout()
-                    fname = f"Patient_{patient}_{view}_{timepoint}_{method_name}.png"
-                    plt.savefig(os.path.join(self.output_dir, fname))
-                    plt.close()
-
-                    results.append({
-                        'patient': patient,
-                        'view': view,
-                        'timepoint': timepoint,
-                        'method': method_name,
-                        'dice': dice
-                    })
-                except Exception as e:
-                    print(f"Error with {method_name} for {patient} {view} {timepoint}: {str(e)}")
-                    results.append({
-                        'patient': patient,
-                        'view': view,
-                        'timepoint': timepoint,
-                        'method': method_name,
-                        'dice': -1,
-                        'error': str(e)
-                    })
-
-        return results
+    return canvas
 
 
-# Usage example
+def save_overlay_image(overlay, patient_id, timepoint, view, output_dir):
+    """Save the overlay image to the specified directory"""
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Create filename
+    filename = f"Patient_{patient_id}_{view}_{timepoint}_overlay.png"
+    output_path = os.path.join(output_dir, filename)
+
+    # Convert BGR to RGB for saving with matplotlib
+    overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+
+    # Save image
+    cv2.imwrite(output_path, overlay_rgb)
+    print(f"Saved overlay image to: {output_path}")
+
+
+def main():
+    # Initialize COCO API
+    coco = COCO(coco_path)
+
+    # Find all unique patient/timepoint combinations
+    patients = set()
+    for img_id in coco.imgs:
+        filename = Path(coco.imgs[img_id]['file_name']).stem
+        parts = filename.split('_')
+        patients.add((parts[0][7:], parts[2], parts[1]))  # (patient_id, timepoint, view)
+
+    # Process each patient/timepoint
+    for patient_id, timepoint, view in patients:
+        results = process_patient(patient_id, timepoint, view, coco, image_dir)
+
+        if 'L' not in results or 'R' not in results:
+            print(f"Skipping Patient {patient_id} {timepoint} {view} - missing left or right mask")
+            continue
+
+        # Create overlay visualization
+        overlay = overlay_masks(results['L'], results['R'])
+
+        # Save overlay image
+        save_overlay_image(overlay, patient_id, timepoint, view, output_dir)
+
+        # Display results
+        plt.figure(figsize=(10, 8))
+        plt.imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+        plt.title(f"Patient {patient_id} | {timepoint} | {view}\nRed: Right, Green: Left (Mirrored)")
+        plt.axis('off')
+        plt.tight_layout()
+        plt.show()
+
+
 if __name__ == "__main__":
-    aligner = FemoralMaskAligner(
-        coco_path=r'C:\Users\SR207348\Downloads\labels_ipsg102_2025-06-30-08-40-52.json',
-        image_dir=r'C:\Users\SR207348\Downloads\ipsg102\ipsg102',
-        output_dir=r"C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\ipsg102_lateral_pillar"
-    )
-    results = aligner.align_and_evaluate()
-    print("Alignment Results:")
-    for res in results:
-        if 'error' in res:
-            print(f"{res['patient']} {res['view']} {res['timepoint']}: "
-                  f"{res['method']} failed - {res['error']}")
-        else:
-            print(f"{res['patient']} {res['view']} {res['timepoint']}: "
-                  f"{res['method']} Dice = {res['dice']:.4f}")
-
-
-#coco_path=r'C:\Users\SR207348\Downloads\labels_ipsg102_2025-06-30-08-40-52.json',
-#image_dir=r'C:\Users\SR207348\Downloads\ipsg102\ipsg102',
-#output_dir=r"C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\ipsg102_lateral_pillar"
+    main()

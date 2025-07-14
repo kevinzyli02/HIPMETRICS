@@ -20,7 +20,7 @@ print(f"Number of images: {len(image_ids)}")
 plt.close('all')
 
 # === Process First 10 Images ===
-for i in range(min(100, len(image_ids))):
+for i in range(min(500, len(image_ids))):
     img_info = coco.loadImgs(image_ids[i])[0]
     image_path = os.path.join(image_dir, img_info['file_name'])
 
