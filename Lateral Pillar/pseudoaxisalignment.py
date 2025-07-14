@@ -166,25 +166,28 @@ def align_femoral_heads(coco_json_path, image_folder, output_folder):
         # Normalize angle to [-π, π]
         theta = (theta + np.pi) % (2 * np.pi) - np.pi
 
-        # Create initial rotation matrix
-        R = np.array([[np.cos(theta), -np.sin(theta)],
-                      [np.sin(theta), np.cos(theta)]])
+        # Create rotation matrices for both orientations
+        R0 = np.array([[np.cos(theta), -np.sin(theta)],
+                       [np.sin(theta), np.cos(theta)]])
+        R180 = np.array([[np.cos(theta + np.pi), -np.sin(theta + np.pi)],
+                         [np.sin(theta + np.pi), np.cos(theta + np.pi)]])
 
-        # Transform unaffected CoM to affected space for verification
-        com_unaff_trans = R @ (unaffected['com'] - unaffected['center_xy']) + affected['center_xy']
+        # Calculate COM distances for both orientations
+        com_unaff_trans0 = R0 @ (unaffected['com'] - unaffected['center_xy']) + affected['center_xy']
+        com_unaff_trans180 = R180 @ (unaffected['com'] - unaffected['center_xy']) + affected['center_xy']
 
-        # Check COM positions relative to affected major axis
-        side_affected = com_side_of_axis(affected['com'], affected['center_xy'], affected['u_major'])
-        side_unaff_trans = com_side_of_axis(com_unaff_trans, affected['center_xy'], affected['u_major'])
+        dist0 = np.linalg.norm(com_unaff_trans0 - affected['com'])
+        dist180 = np.linalg.norm(com_unaff_trans180 - affected['com'])
 
-        # Apply 180° flip if COMs are on opposite sides after initial rotation
-        if side_affected != side_unaff_trans:
-            theta += np.pi
-            # Recreate rotation matrix with correction
-            R = np.array([[np.cos(theta), -np.sin(theta)],
-                          [np.sin(theta), np.cos(theta)]])
-            # Recalculate transformed COM
-            com_unaff_trans = R @ (unaffected['com'] - unaffected['center_xy']) + affected['center_xy']
+        # Choose orientation with smallest COM distance
+        if dist0 <= dist180:
+            R = R0
+            com_unaff_trans = com_unaff_trans0
+            orientation_used = "0°"
+        else:
+            R = R180
+            com_unaff_trans = com_unaff_trans180
+            orientation_used = "180°"
 
         # Transform unaffected head to affected head's space
         transformed_contour = []
@@ -212,7 +215,9 @@ def align_femoral_heads(coco_json_path, image_folder, output_folder):
 
         # Create 2x3 comparison figure
         fig, ax = plt.subplots(2, 3, figsize=(18, 12))
-        fig.suptitle(f"Patient {patient_id} - {timepoint}", fontsize=16)
+        fig.suptitle(
+            f"Patient {patient_id} - {timepoint} | Orientation: {orientation_used} | Dist: {min(dist0, dist180):.1f}",
+            fontsize=16)
 
         # Create custom legend handles
         red_line = Line2D([0], [0], color='red', linewidth=2, label='Affected')
@@ -288,6 +293,15 @@ def align_femoral_heads(coco_json_path, image_folder, output_folder):
         axis_end = affected['center_xy'] + affected['u_major'] * axis_line_length
         ax[1, 2].plot([axis_start[0], axis_end[0]], [axis_start[1], axis_end[1]],
                       color='lime', linestyle='-', linewidth=2, alpha=0.7)
+
+        # Add distance information
+        ax[1, 2].plot([affected['com'][0], com_unaff_trans[0]],
+                      [affected['com'][1], com_unaff_trans[1]],
+                      'w--', linewidth=1.5, alpha=0.7)
+        mid_point = (affected['com'] + com_unaff_trans) / 2
+        ax[1, 2].text(mid_point[0], mid_point[1], f"{min(dist0, dist180):.1f}px",
+                      color='white', fontsize=10, ha='center', va='center',
+                      bbox=dict(facecolor='black', alpha=0.5, boxstyle='round,pad=0.2'))
 
         ax[1, 2].set_title('COM Position Analysis')
         ax[1, 2].legend(handles=[com_marker, trans_com_marker, axis_vector], loc='upper right')

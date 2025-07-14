@@ -10,7 +10,7 @@ from pathlib import Path
 # Define folder locations
 coco_path = r'C:\Users\SR207348\Downloads\labels_ipsg102_2025-06-30-08-40-52.json'
 image_dir = r'C:\Users\SR207348\Downloads\ipsg102\ipsg102'
-output_dir = r"C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\ipsg102_lateral_pillar"
+output_dir = r"C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\overlayed"
 
 
 def rotate_mask(mask, angle, center):
