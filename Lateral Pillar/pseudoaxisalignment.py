@@ -144,7 +144,12 @@ def align_femoral_heads(coco_json_path, image_folder, output_folder):
                 'ratio': minor_length / major_length if major_length > 0 else 0,
                 'laterality': img_info['file_name'].split('_')[-1].split('.')[0],
                 'contour': contour,
-                'com': com  # Center of Mass (x, y)
+                'com': com,
+                'original_mask': mask.copy(),
+                'original_contour': contour.copy(),
+                'original_com': com.copy(),
+                'original_center_xy': center_xy.copy(),
+                'original_u_major': u_major.copy()
             })
 
         if len(heads) != 2:
@@ -157,6 +162,14 @@ def align_femoral_heads(coco_json_path, image_folder, output_folder):
         else:
             unaffected = heads[1]
             affected = heads[0]
+
+        # Always flip the unaffected head for alignment
+        unaffected['mask'] = np.fliplr(unaffected['original_mask'])
+        unaffected['contour'] = unaffected['original_contour'].copy()
+        unaffected['contour'][:, 0] = unaffected['image_info']['width'] - unaffected['contour'][:, 0]
+        unaffected['center_xy'][0] = unaffected['image_info']['width'] - unaffected['original_center_xy'][0]
+        unaffected['com'][0] = unaffected['image_info']['width'] - unaffected['original_com'][0]
+        unaffected['u_major'][0] *= -1
 
         # Calculate rotation angle for major axis alignment
         angle_aff = np.arctan2(affected['u_major'][1], affected['u_major'][0])
@@ -227,24 +240,24 @@ def align_femoral_heads(coco_json_path, image_folder, output_folder):
         trans_com_marker = Line2D([0], [0], marker='o', color='magenta', markersize=8,
                                   markerfacecolor='none', linestyle='', label='Trans COM')
 
-        # Original heads
+        # Original heads (using original unflipped versions)
         ax[0, 0].imshow(affected_img, cmap='gray')
-        ax[0, 0].plot(affected['contour'][:, 0], affected['contour'][:, 1], 'r-', linewidth=1)
-        ax[0, 0].scatter(affected['com'][0], affected['com'][1], facecolor='cyan', edgecolor='cyan',
+        ax[0, 0].plot(affected['original_contour'][:, 0], affected['original_contour'][:, 1], 'r-', linewidth=1)
+        ax[0, 0].scatter(affected['original_com'][0], affected['original_com'][1], facecolor='cyan', edgecolor='cyan',
                          s=80, marker='x')
         ax[0, 0].set_title(f"Affected Head ({affected['laterality']})")
         ax[0, 0].legend(handles=[com_marker], loc='upper right')
         ax[0, 0].axis('off')
 
         ax[0, 1].imshow(unaffected_img, cmap='gray')
-        ax[0, 1].plot(unaffected['contour'][:, 0], unaffected['contour'][:, 1], 'b-', linewidth=1)
-        ax[0, 1].scatter(unaffected['com'][0], unaffected['com'][1], facecolor='cyan', edgecolor='cyan',
+        ax[0, 1].plot(unaffected['original_contour'][:, 0], unaffected['original_contour'][:, 1], 'b-', linewidth=1)
+        ax[0, 1].scatter(unaffected['original_com'][0], unaffected['original_com'][1], facecolor='cyan', edgecolor='cyan',
                          s=80, marker='x')
         ax[0, 1].set_title(f"Unaffected Head ({unaffected['laterality']})")
         ax[0, 1].legend(handles=[com_marker], loc='upper right')
         ax[0, 1].axis('off')
 
-        # Aligned heads overlay
+        # Aligned heads overlay (using transformed flipped version)
         ax[0, 2].imshow(affected_img, cmap='gray')
         ax[0, 2].contour(affected['mask'], colors='red', linewidths=2)
         ax[0, 2].contour(transformed_unaff_mask, colors='blue', linewidths=2, linestyles='dashed')
@@ -254,24 +267,24 @@ def align_femoral_heads(coco_json_path, image_folder, output_folder):
         ax[0, 2].legend(handles=[red_line, blue_dashed, trans_com_marker], loc='upper right')
         ax[0, 2].axis('off')
 
-        # Major axis visualization
+        # Major axis visualization (using original unflipped versions)
         ax[1, 0].imshow(affected_img, cmap='gray')
-        ax[1, 0].plot(affected['contour'][:, 0], affected['contour'][:, 1], 'r-', linewidth=1)
-        ax[1, 0].scatter(affected['com'][0], affected['com'][1], facecolor='cyan', edgecolor='cyan',
+        ax[1, 0].plot(affected['original_contour'][:, 0], affected['original_contour'][:, 1], 'r-', linewidth=1)
+        ax[1, 0].scatter(affected['original_com'][0], affected['original_com'][1], facecolor='cyan', edgecolor='cyan',
                          s=80, marker='x')
-        ax[1, 0].quiver(affected['center_xy'][0], affected['center_xy'][1],
-                        affected['u_major'][0] * 50, affected['u_major'][1] * 50,
+        ax[1, 0].quiver(affected['original_center_xy'][0], affected['original_center_xy'][1],
+                        affected['original_u_major'][0] * 50, affected['original_u_major'][1] * 50,
                         color='lime', scale=1, scale_units='xy', angles='xy', width=0.005)
         ax[1, 0].set_title('Affected: Major Axis & CoM')
         ax[1, 0].legend(handles=[axis_vector, com_marker], loc='upper right')
         ax[1, 0].axis('off')
 
         ax[1, 1].imshow(unaffected_img, cmap='gray')
-        ax[1, 1].plot(unaffected['contour'][:, 0], unaffected['contour'][:, 1], 'b-', linewidth=1)
-        ax[1, 1].scatter(unaffected['com'][0], unaffected['com'][1], facecolor='cyan', edgecolor='cyan',
+        ax[1, 1].plot(unaffected['original_contour'][:, 0], unaffected['original_contour'][:, 1], 'b-', linewidth=1)
+        ax[1, 1].scatter(unaffected['original_com'][0], unaffected['original_com'][1], facecolor='cyan', edgecolor='cyan',
                          s=80, marker='x')
-        ax[1, 1].quiver(unaffected['center_xy'][0], unaffected['center_xy'][1],
-                        unaffected['u_major'][0] * 50, unaffected['u_major'][1] * 50,
+        ax[1, 1].quiver(unaffected['original_center_xy'][0], unaffected['original_center_xy'][1],
+                        unaffected['original_u_major'][0] * 50, unaffected['original_u_major'][1] * 50,
                         color='lime', scale=1, scale_units='xy', angles='xy', width=0.005)
         ax[1, 1].set_title('Unaffected: Major Axis & CoM')
         ax[1, 1].legend(handles=[axis_vector, com_marker], loc='upper right')
@@ -279,26 +292,26 @@ def align_femoral_heads(coco_json_path, image_folder, output_folder):
 
         # COM position analysis
         ax[1, 2].imshow(affected_img, cmap='gray')
-        ax[1, 2].scatter(affected['com'][0], affected['com'][1], facecolor='cyan', edgecolor='cyan',
+        ax[1, 2].scatter(affected['original_com'][0], affected['original_com'][1], facecolor='cyan', edgecolor='cyan',
                          s=80, marker='x')
         ax[1, 2].scatter(com_unaff_trans[0], com_unaff_trans[1], facecolor='none', edgecolor='magenta',
                          s=80, marker='o')
-        ax[1, 2].quiver(affected['center_xy'][0], affected['center_xy'][1],
-                        affected['u_major'][0] * 50, affected['u_major'][1] * 50,
+        ax[1, 2].quiver(affected['original_center_xy'][0], affected['original_center_xy'][1],
+                        affected['original_u_major'][0] * 50, affected['original_u_major'][1] * 50,
                         color='lime', scale=1, scale_units='xy', angles='xy', width=0.005)
 
         # Draw the major axis line
         axis_line_length = 100
-        axis_start = affected['center_xy'] - affected['u_major'] * axis_line_length
-        axis_end = affected['center_xy'] + affected['u_major'] * axis_line_length
+        axis_start = affected['original_center_xy'] - affected['original_u_major'] * axis_line_length
+        axis_end = affected['original_center_xy'] + affected['original_u_major'] * axis_line_length
         ax[1, 2].plot([axis_start[0], axis_end[0]], [axis_start[1], axis_end[1]],
                       color='lime', linestyle='-', linewidth=2, alpha=0.7)
 
         # Add distance information
-        ax[1, 2].plot([affected['com'][0], com_unaff_trans[0]],
-                      [affected['com'][1], com_unaff_trans[1]],
+        ax[1, 2].plot([affected['original_com'][0], com_unaff_trans[0]],
+                      [affected['original_com'][1], com_unaff_trans[1]],
                       'w--', linewidth=1.5, alpha=0.7)
-        mid_point = (affected['com'] + com_unaff_trans) / 2
+        mid_point = (affected['original_com'] + com_unaff_trans) / 2
         ax[1, 2].text(mid_point[0], mid_point[1], f"{min(dist0, dist180):.1f}px",
                       color='white', fontsize=10, ha='center', va='center',
                       bbox=dict(facecolor='black', alpha=0.5, boxstyle='round,pad=0.2'))
