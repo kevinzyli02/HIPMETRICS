@@ -13,16 +13,16 @@ aligned_results = process_all_femoral_heads(
         coco_json_path,
         image_folder,
         output_folder=output_folder,
-        visualize=False,
+        visualize=True,
         max_pairs=10  # Only process 10 hips
     )
 
 # Initialize and calculate measurements
-pm = PerthesMeasurements(aligned_results)
+pm = PerthesMeasurements(aligned_results, output_folder)
 pm.calculate_all_measurements()
 
 # Generate comprehensive report
-pm.generate_report("perthes_measurement_reports")
+pm.generate_reports()
 
 # # Or visualize individual case
 # measurement = pm.measurements[0]

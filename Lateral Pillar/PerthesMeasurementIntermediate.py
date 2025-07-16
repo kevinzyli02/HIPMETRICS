@@ -1,428 +1,348 @@
 import numpy as np
-from scipy.spatial import ConvexHull
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon, Rectangle, Ellipse
-import matplotlib.colors as mcolors
 import os
+import cv2
+import math
 
 
 class PerthesMeasurements:
-    def __init__(self, aligned_results):
+    def __init__(self, aligned_results, output_dir):
         """
         Initialize with aligned femoral head results.
 
         Args:
             aligned_results (list): List of dictionaries from femoral head alignment
+            output_dir (str): Directory to save reports
         """
         self.aligned_results = aligned_results
+        self.output_dir = output_dir
         self.measurements = []
+        os.makedirs(self.output_dir, exist_ok=True)
 
-    def calculate_lateral_pillar(self, mask, major_axis_endpoints):
+    def _get_rotation_angle(self, major_axis_endpoints):
         """
-        Calculate lateral pillar height from femoral head mask and major axis.
+        Calculate rotation angle to make major axis horizontal.
 
         Args:
-            mask (ndarray): Binary mask of femoral head
-            major_axis_endpoints (tuple): ((x1, y1), (x2, y2)) of major axis endpoints
+            major_axis_endpoints (tuple): ((x1,y1),(x2,y2)) of major axis
 
         Returns:
-            tuple: (height, lateral_points, lateral_region)
+            float: Rotation angle in degrees
         """
-        # Extract axis points
         p1, p2 = major_axis_endpoints
-        axis_vector = np.array(p2) - np.array(p1)
-        axis_length = np.linalg.norm(axis_vector)
-        u_axis = axis_vector / axis_length
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
 
-        # Find convex hull points
-        points = np.argwhere(mask)[:, [1, 0]]  # Convert to (x, y)
-        hull = ConvexHull(points)
-        hull_points = points[hull.vertices]
+        # Calculate angle in radians
+        angle_rad = math.atan2(dy, dx)
 
-        # Project points onto major axis
-        proj = np.dot(hull_points - p1, u_axis)
+        # Convert to degrees and ensure horizontal orientation
+        angle_deg = math.degrees(angle_rad)
 
-        # Identify lateral third (most lateral points)
-        lateral_threshold = np.max(proj) - (axis_length / 3)
-        lateral_mask = proj >= lateral_threshold
-        lateral_points = hull_points[lateral_mask]
+        # Normalize to horizontal orientation (0° or 180°)
+        if abs(angle_deg) > 45 and abs(angle_deg) < 135:
+            angle_deg += 90
 
-        if len(lateral_points) < 2:
-            return 0.0, lateral_points, []
+        return -angle_deg  # Negative for clockwise rotation
 
-        # Create perpendicular vector
-        u_perp = np.array([-u_axis[1], u_axis[0]])
-
-        # Project lateral points onto perpendicular axis
-        perp_proj = np.dot(lateral_points - lateral_points.mean(axis=0), u_perp)
-        height = np.max(perp_proj) - np.min(perp_proj)
-
-        # Find lateral region polygon
-        lateral_region = []
-        if len(lateral_points) > 2:
-            # Find convex hull of lateral points
-            try:
-                lateral_hull = ConvexHull(lateral_points)
-                lateral_region = lateral_points[lateral_hull.vertices]
-            except:
-                lateral_region = lateral_points
-
-        return height, lateral_points, lateral_region
-
-    def calculate_epiphyseal_quotient(self, mask):
+    def _rotate_mask(self, mask, angle_deg):
         """
-        Calculate Epiphyseal Quotient (EQ) for a femoral head mask.
-
-        EQ = Height at pseudo minor axis / Width at pseudo major axis
+        Rotate mask around its center of mass.
 
         Args:
-            mask (ndarray): Binary mask of femoral head
+            mask (ndarray): Binary mask
+            angle_deg (float): Rotation angle in degrees
 
         Returns:
-            tuple: (EQ, height, width, bbox_coords)
+            rotated_mask: Rotated binary mask
         """
-        # Find all points in the mask
-        points = np.argwhere(mask)
-        if len(points) < 3:
-            return 0.0, 0.0, 0.0, []
+        # Find center of mass
+        coords = np.argwhere(mask)
+        if len(coords) == 0:
+            return mask
 
-        # Convert to (x, y) format
-        points_xy = points[:, [1, 0]]
+        center_yx = np.mean(coords, axis=0)
+        center_xy = (center_yx[1], center_yx[0])  # Convert to (x, y)
 
-        # Calculate bounding box dimensions
-        min_x, min_y = np.min(points_xy, axis=0)
-        max_x, max_y = np.max(points_xy, axis=0)
+        # Create rotation matrix
+        rotation_matrix = cv2.getRotationMatrix2D(
+            center_xy,
+            angle_deg,
+            1.0  # scale
+        )
+
+        # Apply rotation
+        rotated = cv2.warpAffine(
+            mask.astype(np.uint8) * 255,
+            rotation_matrix,
+            (mask.shape[1], mask.shape[0]),  # (width, height)
+            flags=cv2.INTER_NEAREST
+        )
+
+        return rotated > 127
+
+    def _get_lateral_pillar_height(self, rotated_mask, side):
+        """
+        Calculate lateral pillar height from rotated mask.
+
+        Args:
+            rotated_mask (ndarray): Mask with major axis horizontal
+            side (str): 'left' or 'right'
+
+        Returns:
+            float: Maximum height in lateral third
+        """
+        # Get bounding box of non-zero regions
+        coords = np.argwhere(rotated_mask)
+        if len(coords) == 0:
+            return 0.0
+
+        min_y, min_x = np.min(coords, axis=0)
+        max_y, max_x = np.max(coords, axis=0)
+
+        width = max_x - min_x
+        lateral_third = width // 3
+
+        if side == 'right':
+            x_start = max_x - lateral_third
+            x_end = max_x
+        else:  # left
+            x_start = min_x
+            x_end = min_x + lateral_third
+
+        # Extract lateral third region
+        strip = rotated_mask[min_y:max_y + 1, x_start:x_end]
+        if not np.any(strip):
+            return 0.0
+
+        # Find top and bottom edges
+        y_coords = np.where(strip.any(axis=1))[0]
+        if len(y_coords) == 0:
+            return 0.0
+
+        return y_coords[-1] - y_coords[0] + 1
+
+    def _get_epiphyseal_quotient(self, rotated_mask):
+        """
+        Calculate EQ from rotated mask.
+
+        Args:
+            rotated_mask (ndarray): Mask with major axis horizontal
+
+        Returns:
+            tuple: (EQ, height, width)
+        """
+        points = np.argwhere(rotated_mask)
+        if len(points) < 2:
+            return 0.0, 0.0, 0.0
+
+        min_y, min_x = np.min(points, axis=0)
+        max_y, max_x = np.max(points, axis=0)
+
         width = max_x - min_x
         height = max_y - min_y
-        bbox_coords = [
-            (min_x, min_y),
-            (max_x, min_y),
-            (max_x, max_y),
-            (min_x, max_y)
-        ]
 
-        # Simple EQ calculation: height/width ratio
         if width > 0:
             eq = height / width
         else:
             eq = 0.0
 
-        return eq, height, width, bbox_coords
+        return eq, height, width
 
     def calculate_all_measurements(self):
         """
         Calculate all Perthes measurements for all aligned results.
-
-        Populates:
-            self.measurements - List of measurement dictionaries
         """
         self.measurements = []
 
         for result in self.aligned_results:
-            # Lateral Pillar measurements
-            A_lateral, A_lat_points, A_lat_region = self.calculate_lateral_pillar(
-                result['affected_mask'],
-                result['aff_major_axis']
-            )
-            B_lateral, B_lat_points, B_lat_region = self.calculate_lateral_pillar(
-                result['transformed_unaff_mask'],
-                result['trans_unaff_major_axis']
-            )
-            LP_ratio = A_lateral / B_lateral if B_lateral > 0 else float('nan')
+            # Get rotation angle from affected head
+            angle = self._get_rotation_angle(result['aff_major_axis'])
 
-            # Epiphyseal Quotient measurements
-            A_eq, A_height, A_width, A_bbox = self.calculate_epiphyseal_quotient(
-                result['affected_mask']
-            )
-            B_eq, B_height, B_width, B_bbox = self.calculate_epiphyseal_quotient(
-                result['unaffected_original_mask']  # Use original unaffected mask
-            )
+            # Rotate both masks using the same angle
+            aff_rotated = self._rotate_mask(result['affected_mask'], angle)
+            unaff_rotated = self._rotate_mask(result['transformed_unaff_mask'], angle)
 
-            # Deformity Index (1 - (A/B))
-            DI = 1 - (A_eq / B_eq) if B_eq > 0 else float('nan')
+            # Get sides
+            aff_side = result['affected_laterality'].lower()
+            unaff_side = result['unaffected_laterality'].lower()
 
-            # Create measurement record
-            measurement = {
+            # Process affected head
+            aff_lp_height = self._get_lateral_pillar_height(aff_rotated, aff_side)
+            aff_eq, aff_height, aff_width = self._get_epiphyseal_quotient(aff_rotated)
+
+            # Process unaffected head
+            unaff_lp_height = self._get_lateral_pillar_height(unaff_rotated, unaff_side)
+            unaff_eq, unaff_height, unaff_width = self._get_epiphyseal_quotient(unaff_rotated)
+
+            # Calculate ratios
+            if unaff_lp_height > 0:
+                lp_ratio = aff_lp_height / unaff_lp_height
+            else:
+                lp_ratio = float('nan')
+
+            if unaff_eq > 0:
+                di = 1 - (aff_eq / unaff_eq)
+            else:
+                di = float('nan')
+
+            # Store measurements
+            self.measurements.append({
                 'patient_id': result['patient_id'],
                 'timepoint': result['timepoint'],
-                'affected_lateral': A_lateral,
-                'unaffected_lateral': B_lateral,
-                'LP_ratio': LP_ratio,
-                'affected_EQ': A_eq,
-                'unaffected_EQ': B_eq,
-                'affected_height': A_height,
-                'affected_width': A_width,
-                'unaffected_height': B_height,
-                'unaffected_width': B_width,
-                'deformity_index': DI,
+                'affected_lateral': aff_lp_height,
+                'unaffected_lateral': unaff_lp_height,
+                'LP_ratio': lp_ratio,
+                'affected_EQ': aff_eq,
+                'unaffected_EQ': unaff_eq,
+                'affected_height': aff_height,
+                'affected_width': aff_width,
+                'unaffected_height': unaff_height,
+                'unaffected_width': unaff_width,
+                'deformity_index': di,
                 'com_distance': result['dist'],
-                # Visualization data
-                'aff_lat_points': A_lat_points,
-                'aff_lat_region': A_lat_region,
-                'unaff_lat_points': B_lat_points,
-                'unaff_lat_region': B_lat_region,
-                'aff_bbox': A_bbox,
-                'unaff_bbox': B_bbox,
-                'result_data': result  # Reference to original result
-            }
-            self.measurements.append(measurement)
+                'affected_side': aff_side,
+                'unaffected_side': unaff_side,
+                'rotated_affected': aff_rotated,
+                'rotated_unaffected': unaff_rotated,
+                'result_data': result
+            })
 
-    def to_dataframe(self):
-        """Convert measurements to pandas DataFrame"""
-        return pd.DataFrame(self.measurements)
-
-    def to_csv(self, file_path):
-        """Save measurements to CSV file"""
-        df = self.to_dataframe()
-        df.to_csv(file_path, index=False)
-
-    def visualize_lateral_pillar(self, measurement, head_type='affected', ax=None, save_path=None):
+    def _create_visualization(self, measurement):
         """
-        Visualize lateral pillar measurement on femoral head.
+        Create visualization for one measurement case.
 
-        Args:
-            measurement (dict): Single measurement dictionary
-            head_type (str): 'affected' or 'unaffected'
-            ax (matplotlib.axes.Axes): Existing axis to plot on
-            save_path (str): Path to save visualization
+        Returns:
+            fig: Matplotlib figure
         """
-        # Get data based on head type
-        if head_type == 'affected':
-            mask_key = 'affected_mask'
-            major_axis_key = 'aff_major_axis'
-            lat_points = measurement['aff_lat_points']
-            lat_region = measurement['aff_lat_region']
-            height = measurement['affected_lateral']
-        else:
-            mask_key = 'transformed_unaff_mask'
-            major_axis_key = 'trans_unaff_major_axis'
-            lat_points = measurement['unaff_lat_points']
-            lat_region = measurement['unaff_lat_region']
-            height = measurement['unaffected_lateral']
+        fig = plt.figure(figsize=(18, 6))
+        gs = fig.add_gridspec(1, 3)
 
-        mask = measurement['result_data'][mask_key]
-        major_axis = measurement['result_data'][major_axis_key]
+        # Panel 1: Unaffected side
+        ax1 = fig.add_subplot(gs[0, 0])
+        self._plot_head(ax1,
+                        measurement['rotated_unaffected'],
+                        f"Unaffected {measurement['unaffected_side'].capitalize()} Head",
+                        'blue',
+                        measurement['unaffected_side'])
 
-        # Create figure if needed
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 8))
-        else:
-            fig = ax.get_figure()
+        # Panel 2: Affected side with overlay
+        ax2 = fig.add_subplot(gs[0, 1])
+        self._plot_head(ax2,
+                        measurement['rotated_affected'],
+                        f"Affected {measurement['affected_side'].capitalize()} Head",
+                        'red',
+                        measurement['affected_side'])
+        # Overlay unaffected in blue with transparency
+        self._plot_head(ax2,
+                        measurement['rotated_unaffected'],
+                        None,
+                        'blue',
+                        measurement['unaffected_side'],
+                        alpha=0.3)
 
-        # Create RGB representation of mask
-        rgb_mask = np.zeros((*mask.shape, 3), dtype=np.uint8)
-        rgb_mask[mask] = [70, 130, 180]  # Steel blue
+        # Panel 3: Measurements
+        ax3 = fig.add_subplot(gs[0, 2])
+        self._plot_measurements(ax3, measurement)
 
-        # Plot mask
-        ax.imshow(rgb_mask)
+        plt.tight_layout()
+        return fig
 
-        # Plot convex hull points
-        if len(lat_points) > 0:
-            ax.scatter(lat_points[:, 0], lat_points[:, 1],
-                       s=20, c='yellow', alpha=0.7, label='Lateral Points')
+    def _plot_head(self, ax, mask, title, color, side, alpha=1.0):
+        """Plot a single head mask without flipping."""
+        # Create RGB image
+        rgb = np.zeros((*mask.shape, 3))
+        if color == 'red':
+            rgb[mask] = [1, 0, 0]
+        else:  # blue
+            rgb[mask] = [0, 0, 1]
 
-        # Plot lateral region
-        if len(lat_region) > 0:
-            poly = Polygon(lat_region, closed=True,
-                           fill=True, alpha=0.3, color='orange')
-            ax.add_patch(poly)
-
-        # Plot major axis
-        p1, p2 = major_axis
-        ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
-                'r-', linewidth=2, label='Major Axis')
-
-        # Calculate and plot lateral pillar height
-        if height > 0 and len(lat_points) > 1:
-            # Find min and max points in perpendicular direction
-            mid_point = np.mean(lat_points, axis=0)
-            u_perp = np.array([-(p2[1] - p1[1]), p2[0] - p1[0]])
-            u_perp /= np.linalg.norm(u_perp)
-
-            perp_proj = np.dot(lat_points - mid_point, u_perp)
-            min_idx = np.argmin(perp_proj)
-            max_idx = np.argmax(perp_proj)
-
-            # Plot height line
-            ax.plot([lat_points[min_idx, 0], lat_points[max_idx, 0]],
-                    [lat_points[min_idx, 1], lat_points[max_idx, 1]],
-                    'g-', linewidth=3, label=f'Lateral Height: {height:.1f}px')
-
-        # Configure plot
-        ax.set_title(
-            f"{head_type.capitalize()} Head Lateral Pillar\nPatient {measurement['patient_id']} - {measurement['timepoint']}")
-        ax.legend()
+        # Display without flipping
+        ax.imshow(rgb, alpha=alpha, origin='upper')
+        if title:
+            ax.set_title(title)
         ax.axis('off')
 
-        # Save or return
-        if save_path:
-            plt.savefig(save_path, bbox_inches='tight', dpi=150)
-            plt.close(fig)
-            return None
+        # Add lateral third indicator
+        width = mask.shape[1]
+        lateral_third = width // 3
+        if side == 'right':
+            ax.axvline(width - lateral_third, color='yellow', linestyle='--')
         else:
-            return fig
+            ax.axvline(lateral_third, color='yellow', linestyle='--')
 
-    def visualize_epiphyseal_quotient(self, measurement, head_type='affected', ax=None, save_path=None):
-        """
-        Visualize epiphyseal quotient measurement on femoral head.
+        # Add height indicator
+        coords = np.argwhere(mask)
+        if len(coords) > 0:
+            min_y, min_x = np.min(coords, axis=0)
+            max_y, max_x = np.max(coords, axis=0)
+            height = max_y - min_y + 1
+            width = max_x - min_x + 1
 
-        Args:
-            measurement (dict): Single measurement dictionary
-            head_type (str): 'affected' or 'unaffected'
-            ax (matplotlib.axes.Axes): Existing axis to plot on
-            save_path (str): Path to save visualization
-        """
-        # Get data based on head type
-        if head_type == 'affected':
-            mask_key = 'affected_mask'
-            bbox = measurement['aff_bbox']
-            eq = measurement['affected_EQ']
-            height = measurement['affected_height']
-            width = measurement['affected_width']
-        else:
-            mask_key = 'unaffected_original_mask'
-            bbox = measurement['unaff_bbox']
-            eq = measurement['unaffected_EQ']
-            height = measurement['unaffected_height']
-            width = measurement['unaffected_width']
+            # Place width at bottom
+            ax.text(min_x + width // 2, max_y + 5, f"W: {width:.1f}",
+                    color='white', fontsize=10, ha='center',
+                    bbox=dict(facecolor='black', alpha=0.5))
 
-        mask = measurement['result_data'][mask_key]
+            # Place height on right side
+            ax.text(max_x + 5, min_y + height // 2, f"H: {height:.1f}",
+                    color='white', fontsize=10, va='center', rotation=270,
+                    bbox=dict(facecolor='black', alpha=0.5))
 
-        # Create figure if needed
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 8))
-        else:
-            fig = ax.get_figure()
-
-        # Create RGB representation of mask
-        rgb_mask = np.zeros((*mask.shape, 3), dtype=np.uint8)
-        rgb_mask[mask] = [70, 130, 180]  # Steel blue
-
-        # Plot mask
-        ax.imshow(rgb_mask)
-
-        # Plot bounding box
-        if len(bbox) > 0:
-            rect = Polygon(bbox, closed=True,
-                           fill=False, linewidth=3,
-                           edgecolor='red', linestyle='--')
-            ax.add_patch(rect)
-
-            # Add dimension labels
-            min_x, min_y = bbox[0]
-            max_x, max_y = bbox[2]
-            ax.text(min_x + width / 2, min_y - 5, f"Width: {width:.1f}px",
-                    color='red', fontsize=12, ha='center')
-            ax.text(min_x - 10, min_y + height / 2, f"Height: {height:.1f}px",
-                    color='red', fontsize=12, va='center', rotation=90)
-
-        # Add EQ text
-        ax.text(0.5, 0.95, f"EQ = {eq:.2f}",
-                transform=ax.transAxes, color='white', fontsize=14,
-                ha='center', bbox=dict(facecolor='black', alpha=0.7))
-
-        # Configure plot
-        ax.set_title(
-            f"{head_type.capitalize()} Head Epiphyseal Quotient\nPatient {measurement['patient_id']} - {measurement['timepoint']}")
+    def _plot_measurements(self, ax, measurement):
+        """Plot measurement summary."""
         ax.axis('off')
+        ax.set_title("Measurement Summary", fontsize=16)
 
-        # Save or return
-        if save_path:
-            plt.savefig(save_path, bbox_inches='tight', dpi=150)
+        # Create text content
+        text_content = [
+            f"Patient: {measurement['patient_id']}",
+            f"Timepoint: {measurement['timepoint']}",
+            "",
+            "Lateral Pillar:",
+            f"Affected height: {measurement['affected_lateral']:.1f} px",
+            f"Unaffected height: {measurement['unaffected_lateral']:.1f} px",
+            f"LP Ratio: {measurement['LP_ratio']:.2f}",
+            "",
+            "Epiphyseal Quotient:",
+            f"Affected EQ: {measurement['affected_EQ']:.2f}",
+            f"Unaffected EQ: {measurement['unaffected_EQ']:.2f}",
+            f"Deformity Index: {measurement['deformity_index']:.2f}",
+            "",
+            f"COM Distance: {measurement['com_distance']:.1f} px"
+        ]
+
+        # Add text to axis
+        ax.text(0.5, 0.5, "\n".join(text_content),
+                fontsize=14,
+                ha='center', va='center',
+                bbox=dict(facecolor='lightgray', alpha=0.5))
+
+    def generate_reports(self):
+        """Generate all reports and save Excel file."""
+        self.calculate_all_measurements()
+
+        # Save Excel file
+        excel_path = os.path.join(self.output_dir, 'perthes_measurements.xlsx')
+        df = pd.DataFrame(self.measurements)
+
+        # Drop image data before saving to Excel
+        cols_to_drop = ['rotated_affected', 'rotated_unaffected', 'result_data']
+        for col in cols_to_drop:
+            if col in df.columns:
+                df = df.drop(columns=[col])
+
+        df.to_excel(excel_path, index=False)
+
+        # Generate visual reports
+        for measurement in self.measurements:
+            fig = self._create_visualization(measurement)
+            report_path = os.path.join(
+                self.output_dir,
+                f"patient_{measurement['patient_id']}_{measurement['timepoint']}_report.png"
+            )
+            fig.savefig(report_path, bbox_inches='tight', dpi=150)
             plt.close(fig)
-            return None
-        else:
-            return fig
 
-    def visualize_measurements(self, measurement, save_path=None):
-        """
-        Create comprehensive visualization of all measurements for one case.
-
-        Args:
-            measurement (dict): Single measurement dictionary
-            save_path (str): Path to save visualization
-        """
-        # Create figure
-        fig, axs = plt.subplots(2, 2, figsize=(16, 16))
-        fig.suptitle(f"Perthes Measurements - Patient {measurement['patient_id']} - {measurement['timepoint']}",
-                     fontsize=20)
-
-        # Panel 1: Affected Lateral Pillar
-        self.visualize_lateral_pillar(measurement, 'affected', ax=axs[0, 0])
-
-        # Panel 2: Unaffected Lateral Pillar
-        self.visualize_lateral_pillar(measurement, 'unaffected', ax=axs[0, 1])
-
-        # Panel 3: Affected Epiphyseal Quotient
-        self.visualize_epiphyseal_quotient(measurement, 'affected', ax=axs[1, 0])
-
-        # Panel 4: Unaffected Epiphyseal Quotient
-        self.visualize_epiphyseal_quotient(measurement, 'unaffected', ax=axs[1, 1])
-
-        # Add summary text
-        summary_text = (
-            f"Lateral Pillar Ratio: {measurement['LP_ratio']:.2f}\n"
-            f"Affected EQ: {measurement['affected_EQ']:.2f}\n"
-            f"Unaffected EQ: {measurement['unaffected_EQ']:.2f}\n"
-            f"Deformity Index: {measurement['deformity_index']:.2f}\n"
-            f"COM Distance: {measurement['com_distance']:.1f}px"
-        )
-        fig.text(0.5, 0.05, summary_text, ha='center', fontsize=16,
-                 bbox=dict(facecolor='lightgray', alpha=0.5))
-
-        plt.tight_layout(rect=[0, 0.1, 1, 0.95])
-
-        # Save or return
-        if save_path:
-            plt.savefig(save_path, bbox_inches='tight', dpi=150)
-            plt.close(fig)
-            return None
-        else:
-            return fig
-
-    def generate_report(self, output_dir):
-        """
-        Generate visual report for all measurements.
-
-        Args:
-            output_dir (str): Directory to save visualizations
-        """
-        os.makedirs(output_dir, exist_ok=True)
-
-        for i, measurement in enumerate(self.measurements):
-            # Create individual visualizations
-            self.visualize_measurements(
-                measurement,
-                save_path=os.path.join(output_dir,
-                                       f"patient_{measurement['patient_id']}_{measurement['timepoint']}_measurements.png")
-            )
-
-            # Create separate visualizations for lateral pillar and EQ
-            self.visualize_lateral_pillar(
-                measurement, 'affected',
-                save_path=os.path.join(output_dir,
-                                       f"patient_{measurement['patient_id']}_{measurement['timepoint']}_affected_lateral.png")
-            )
-
-            self.visualize_lateral_pillar(
-                measurement, 'unaffected',
-                save_path=os.path.join(output_dir,
-                                       f"patient_{measurement['patient_id']}_{measurement['timepoint']}_unaffected_lateral.png")
-            )
-
-            self.visualize_epiphyseal_quotient(
-                measurement, 'affected',
-                save_path=os.path.join(output_dir,
-                                       f"patient_{measurement['patient_id']}_{measurement['timepoint']}_affected_eq.png")
-            )
-
-            self.visualize_epiphyseal_quotient(
-                measurement, 'unaffected',
-                save_path=os.path.join(output_dir,
-                                       f"patient_{measurement['patient_id']}_{measurement['timepoint']}_unaffected_eq.png")
-            )
-
-        # Save CSV report
-        self.to_csv(os.path.join(output_dir, "perthes_measurements.csv"))
-        print(f"Generated report with {len(self.measurements)} cases in {output_dir}")
+        print(f"Generated {len(self.measurements)} reports in {self.output_dir}")

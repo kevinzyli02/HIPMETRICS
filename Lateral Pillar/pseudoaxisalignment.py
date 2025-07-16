@@ -6,7 +6,6 @@ from scipy.spatial import ConvexHull, distance_matrix
 import os
 import matplotlib.pyplot as plt
 from PIL import Image
-from tqdm import tqdm
 import matplotlib
 from matplotlib.lines import Line2D
 import time
@@ -498,8 +497,11 @@ def process_all_femoral_heads(coco_json_path, image_folder, output_folder=None,
 
     # Process pairs
     results = []
-    for pair in tqdm(pairs, desc="Processing hips"):
-        start_time = time.time()
+    total_pairs = len(pairs)
+    start_time = time.time()
+
+    for i, pair in enumerate(pairs):
+        pair_start = time.time()
         res = process_femoral_head_pair(
             pair, coco_data, image_folder,
             visualize=visualize,
@@ -508,9 +510,11 @@ def process_all_femoral_heads(coco_json_path, image_folder, output_folder=None,
 
         if res:
             results.append(res)
-            print(f"Processed {pair['patient_id']}-{pair['timepoint']} in {time.time() - start_time:.2f}s")
+            elapsed = time.time() - pair_start
+            print(f"Processed {pair['patient_id']}-{pair['timepoint']} ({i + 1}/{total_pairs}) in {elapsed:.2f}s")
 
-    print(f"Processed {len(results)} femoral head pairs")
+    total_time = time.time() - start_time
+    print(f"Processed {len(results)} femoral head pairs in {total_time:.2f} seconds")
     return results
 
 
