@@ -14,13 +14,14 @@ aligned_results = process_all_femoral_heads(
         image_folder,
         output_folder=output_folder,
         visualize=False,
-        max_pairs=3  # Only process 10 hips
+        max_pairs=10  # Only process 10 hips
     )
 
 # Initialize and calculate measurements
 for result in aligned_results:
     analyzer = FemoralHeadAnalyzer(result, output_folder)
     analyzer.process()
+
 
 
 

@@ -6,6 +6,7 @@ import pandas as pd
 import os
 from pathlib import Path
 
+
 class FemoralHeadAnalyzer:
     def __init__(self, result_dict, output_folder):
         """
@@ -23,11 +24,14 @@ class FemoralHeadAnalyzer:
         self.rotated_unaff_mask = None
         self.pillar_measurements = {}
         self.eq_measurements = {}
+        self.deformity_index = None  # Add attribute for deformity index
+
     def _compute_rotation_angle(self, axis_endpoints):
         """Calculate rotation angle to make major axis horizontal."""
         (x1, y1), (x2, y2) = axis_endpoints
         dx, dy = x2 - x1, y2 - y1
         return np.degrees(np.arctan2(dy, dx))  # Negative to counter-clockwise rotation
+
     def _rotate_mask(self, mask, angle, center=None):
         """
         Rotate mask around a specified center.
@@ -56,12 +60,35 @@ class FemoralHeadAnalyzer:
             cval=0
         )
         return rotated > 0.5
+
     def _get_major_axis_center(self, axis_endpoints):
         """Calculate midpoint of major axis"""
         (x1, y1), (x2, y2) = axis_endpoints
         return ((x1 + x2) / 2, (y1 + y2) / 2)
+
+    def _rotate_point(self, point, center, angle_deg):
+        """Rotate a point around a center by given angle in degrees."""
+        angle_rad = np.radians(angle_deg)
+        x, y = point
+        cx, cy = center
+
+        # Translate point to origin
+        x_translated = x - cx
+        y_translated = y - cy
+
+        # Apply rotation
+        x_rotated = x_translated * np.cos(angle_rad) - y_translated * np.sin(angle_rad)
+        y_rotated = x_translated * np.sin(angle_rad) + y_translated * np.cos(angle_rad)
+
+        # Translate back
+        new_x = x_rotated + cx
+        new_y = y_rotated + cy
+
+        return new_x, new_y
+
     def align_major_axis(self):
-        """Rotate masks around center of major axis to make it horizontal"""
+        """Rotate masks around center of major axis to make it horizontal,
+        with additional 180° rotation check for unaffected mask."""
         # Calculate rotation angle
         angle = self._compute_rotation_angle(self.data['aff_major_axis'])
 
@@ -77,10 +104,30 @@ class FemoralHeadAnalyzer:
             self.data['transformed_unaff_mask'], angle, center=unaff_center
         )
 
-        # Visualize rotation
-        return self._visualize_rotation(angle, aff_center, unaff_center)
+        # --- 180° rotation check for unaffected mask ---
+        # Get original center of mass for unaffected mask
+        com_orig = self.data['com_unaff_trans']  # (x, y)
 
-    def _visualize_rotation(self, angle, aff_center, unaff_center):
+        # Calculate rotated COM positions
+        com_rotated = self._rotate_point(com_orig, unaff_center, angle)
+        com_rotated_180 = self._rotate_point(com_rotated, unaff_center, 180)
+
+        # Compare y-values and rotate 180° if needed
+        if com_rotated_180[1] < com_rotated[1]:
+            self.rotated_unaff_mask = self._rotate_mask(
+                self.rotated_unaff_mask, 180, center=unaff_center
+            )
+            self.rotated_aff_mask = self._rotate_mask(
+                self.rotated_aff_mask, 180, center=aff_center
+            )
+            self.unaff_flipped = True
+        else:
+            self.unaff_flipped = False
+
+        # Visualize rotation
+        return self._visualize_rotation(angle, aff_center, unaff_center, com_rotated,com_rotated_180)
+
+    def _visualize_rotation(self, angle, aff_center, unaff_center, com_rotated,com_rotated_180):
         """Visualize rotation centers and results"""
         fig, axes = plt.subplots(2, 2, figsize=(12, 12))
 
@@ -102,12 +149,9 @@ class FemoralHeadAnalyzer:
         ax.scatter(unaff_center[0], unaff_center[1], c='yellow', s=100, marker='*')
         ax.set_title("Unaffected Head - Original")
 
-
-
         # Rotated affected mask
         ax = axes[1, 0]
         ax.imshow(self.rotated_aff_mask, cmap='gray')
-
         # Draw horizontal line at rotation center
         ax.axhline(aff_center[1], color='cyan', linestyle='--', alpha=0.5)
         ax.scatter(aff_center[0], aff_center[1], c='yellow', s=100, marker='*')
@@ -118,97 +162,22 @@ class FemoralHeadAnalyzer:
         ax.imshow(self.rotated_unaff_mask, cmap='gray')
         ax.axhline(unaff_center[1], color='cyan', linestyle='--', alpha=0.5)
         ax.scatter(unaff_center[0], unaff_center[1], c='yellow', s=100, marker='*')
-        ax.set_title(f"Unaffected Head - Rotated ({angle:.1f}°)")
 
-        # Save visualization
+        # Add COM points
+        ax.scatter(com_rotated[0], com_rotated[1], c='green', s=100, marker='o')
+        ax.scatter(com_rotated_180[0], com_rotated_180[1], c='purple', s=100, marker='x')
+
+        title = f"Unaffected Head - Rotated ({angle:.1f}°)"
+        if self.unaff_flipped:
+            title += " (FLIPPED)"
+        ax.set_title(title)
+
         debug_path = self.output_folder / f"{self.data['patient_id']}_{self.data['timepoint']}_axis_rotation.png"
         plt.tight_layout()
         plt.savefig(debug_path, bbox_inches='tight')
         plt.close(fig)
 
         return debug_path
-    def _visualize_axis_endpoints(self, mask, axis_endpoints, title):
-        """Visualize mask with axis endpoints marked"""
-        plt.figure(figsize=(6, 6))
-        plt.imshow(mask, cmap='gray')
-
-        # Unpack endpoints
-        try:
-            (x1, y1), (x2, y2) = axis_endpoints
-            plt.scatter([x1, x2], [y1, y2], c=['red', 'blue'], s=50)
-            plt.plot([x1, x2], [y1, y2], 'g-', linewidth=2)
-            plt.title(f"{title}\n({x1:.1f},{y1:.1f}) to ({x2:.1f},{y2:.1f})")
-        except Exception as e:
-            plt.title(f"Error: {e}")
-
-        plt.axis('off')
-        debug_path = self.output_folder / f"{title.replace(' ', '_')}_axis_debug.png"
-        plt.savefig(debug_path, bbox_inches='tight')
-        plt.close()
-        print(f"Saved axis debug: {debug_path}")
-    def _draw_major_axis(self, mask, axis_endpoints, color=(0, 255, 0)):
-        """Draw major axis on a mask and return as RGB image"""
-        # Convert to RGB
-        rgb = np.stack([mask] * 3, axis=-1).astype(np.uint8) * 255
-        # Draw axis line
-        (x1, y1), (x2, y2) = axis_endpoints
-        pt1 = (int(x1), int(y1))
-        pt2 = (int(x2), int(y2))
-        cv2.line(rgb, pt1, pt2, color, 2)
-        # Draw endpoints
-        cv2.circle(rgb, pt1, 5, (255, 0, 0), -1)
-        cv2.circle(rgb, pt2, 5, (0, 0, 255), -1)
-        return rgb
-    def _rotate_axis(self, axis_endpoints, mask, angle):
-        """Rotate axis endpoints using the same transformation as the mask"""
-        # Calculate center of mass
-        y_indices, x_indices = np.where(mask)
-        if len(y_indices) == 0 or len(x_indices) == 0:
-            return axis_endpoints
-        cx, cy = np.mean(x_indices), np.mean(y_indices)
-
-        # Rotate both points
-        (x1, y1), (x2, y2) = axis_endpoints
-        p1_rot = self._rotate_point((x1, y1), (cx, cy), angle)
-        p2_rot = self._rotate_point((x2, y2), (cx, cy), angle)
-
-        return (p1_rot, p2_rot)
-    def _rotate_point(self, point, center, angle_deg):
-        """Rotate a point around center by angle (degrees)"""
-        angle_rad = np.radians(angle_deg)
-        x, y = point
-        cx, cy = center
-
-        # Translate point to origin
-        x_translated = x - cx
-        y_translated = y - cy
-
-        # Apply rotation
-        x_rotated = x_translated * np.cos(angle_rad) - y_translated * np.sin(angle_rad)
-        y_rotated = x_translated * np.sin(angle_rad) + y_translated * np.cos(angle_rad)
-
-        # Translate back
-        return (x_rotated + cx, y_rotated + cy)
-    def _save_rotation_debug(self, orig_img, rot_img, patient_id, timepoint):
-        """Save rotation debug images"""
-        # Create figure
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
-
-        # Plot original
-        ax1.imshow(orig_img)
-        ax1.set_title(f"Original - {patient_id} {timepoint}")
-        ax1.axis('off')
-
-        # Plot rotated
-        ax2.imshow(rot_img)
-        ax2.set_title(f"Rotated - {patient_id} {timepoint}")
-        ax2.axis('off')
-
-        # Save to file
-        debug_path = self.output_folder / f"{patient_id}_{timepoint}_rotation_debug.png"
-        plt.savefig(debug_path, bbox_inches='tight')
-        plt.close(fig)
-        print(f"Saved rotation debug to: {debug_path}")
 
     def _calculate_pillar_heights(self, mask, laterality):
         """Measure max and average heights for lateral, middle, medial pillars."""
@@ -251,6 +220,7 @@ class FemoralHeadAnalyzer:
             results.extend([max_height, avg_height])
 
         return results
+
     def measure_pillars(self):
         """Calculate pillar heights for both masks and ratios."""
         # Measure heights for affected and unaffected masks
@@ -281,6 +251,7 @@ class FemoralHeadAnalyzer:
         self.pillar_measurements.update({
             'ratio_' + k: v for k, v in zip(pillar_types, ratios)
         })
+
     def _calculate_epiphyseal_quotient(self, mask):
         """Calculate height/width ratio for femoral head mask."""
         coords = np.argwhere(mask)
@@ -299,6 +270,7 @@ class FemoralHeadAnalyzer:
             eq = 0.0
 
         return eq, width, height
+
     def measure_epiphyseal_quotient(self):
         """Calculate EQ (height/width) for both femoral heads."""
         # Calculate EQ for affected head
@@ -318,6 +290,139 @@ class FemoralHeadAnalyzer:
             'unaff_height': unaff_height,
             'eq_ratio': eq_ratio
         }
+
+    def calculate_deformity_index(self, visualize=False):
+        """
+        Calculate the deformity index and store it in self.deformity_index.
+
+        Parameters:
+        visualize (bool): Whether to visualize the deformity index calculation (default is False).
+
+        Returns:
+        float: Deformity index.
+        """
+        affected_mask = self.data['affected_mask']
+        transformed_unaff_mask = self.data['transformed_unaff_mask']
+        laterality = self.data['affected_laterality']
+        unaff_width = self.eq_measurements['unaff_width']  # diameter of unaffected hip
+
+        # Step 1: Find the lowest points for alignment
+        # Get the lowest y-point of the affected mask
+        affected_y_min = np.min(np.where(affected_mask == 1)[0])  # Y position of lowest point in affected mask
+        affected_x_min = np.min(np.where(affected_mask == 1)[1])  # X position of lowest point in affected mask
+
+        # Get the lowest y-point of the transformed unaffected mask (aligned based on laterality)
+        if laterality == 'R':  # Right side
+            unaff_y_min = np.min(np.where(transformed_unaff_mask == 1)[0])
+            unaff_x_min = np.max(np.where(transformed_unaff_mask == 1)[1])  # Rightmost point
+        else:  # Left side
+            unaff_y_min = np.min(np.where(transformed_unaff_mask == 1)[0])
+            unaff_x_min = np.min(np.where(transformed_unaff_mask == 1)[1])  # Leftmost point
+
+        # Step 2: Align the masks by translating the transformed unaffected mask
+        y_translation = affected_y_min - unaff_y_min
+        x_translation = affected_x_min - unaff_x_min
+
+        # Translate the unaffected mask
+        aligned_unaff_mask = np.roll(transformed_unaff_mask, shift=(y_translation, x_translation), axis=(0, 1))
+
+        # Step 3: Calculate bounding boxes for both masks
+        def get_bbox(mask):
+            coords = np.argwhere(mask)
+            if len(coords) == 0:
+                return (0, 0, 0, 0)
+            y_min, x_min = coords.min(axis=0)
+            y_max, x_max = coords.max(axis=0)
+            return (x_min, y_min, x_max, y_max)
+
+        aff_bbox = get_bbox(affected_mask)
+        unaff_bbox = get_bbox(aligned_unaff_mask)
+
+        # Unpack bounding boxes
+        aff_xmin, aff_ymin, aff_xmax, aff_ymax = aff_bbox
+        unaff_xmin, unaff_ymin, unaff_xmax, unaff_ymax = unaff_bbox
+
+        # Calculate height difference (top position difference)
+        height_diff = abs(aff_ymax - unaff_ymax)
+
+        # Calculate width difference based on laterality
+        if laterality == 'R':
+            # Right hip: difference between affected rightmost and unaffected leftmost
+            width_diff = abs(aff_xmax - unaff_xmin)
+        else:
+            # Left hip: difference between unaffected rightmost and affected rightmost
+            width_diff = abs(unaff_xmax - aff_xmax)
+
+        # Step 4: Calculate the deformity index
+        deformity_index = (height_diff + width_diff) / unaff_width
+
+        # Store the result
+        self.deformity_index = deformity_index
+
+        # If visualize is True, generate the visualization
+        if visualize:
+            self._visualize_deformity_index(
+                affected_mask, aligned_unaff_mask,
+                laterality, height_diff, width_diff
+            )
+
+        return deformity_index
+
+    def _visualize_deformity_index(self, affected_mask, aligned_unaff_mask, laterality, height_diff, width_diff):
+        """
+        Visualize and save the deformity index calculation.
+
+        Parameters:
+        affected_mask (ndarray): Binary mask of the affected femoral head.
+        aligned_unaff_mask (ndarray): Transformed binary mask of the unaffected femoral head.
+        laterality (str): Laterality of the affected femoral head ('L' or 'R').
+        height_diff (int): Maximum height difference between the aligned masks.
+        width_diff (int): Maximum width difference between the aligned masks.
+        """
+        # Create a figure and axis
+        fig, ax = plt.subplots(figsize=(8, 8))
+
+        # Display the affected and transformed unaffected masks
+        ax.imshow(affected_mask, cmap='Blues', alpha=0.6, label='Affected Mask')
+        ax.imshow(aligned_unaff_mask, cmap='Reds', alpha=0.6, label='Transformed Unaffected Mask')
+
+        # Get the coordinates of the lowest points for alignment
+        affected_y_min = np.min(np.where(affected_mask == 1)[0])
+        affected_x_min = np.min(np.where(affected_mask == 1)[1])
+
+        if laterality == 'R':
+            unaff_y_min = np.min(np.where(aligned_unaff_mask == 1)[0])
+            unaff_x_min = np.max(np.where(aligned_unaff_mask == 1)[1])  # Rightmost point
+        else:  # Left side
+            unaff_y_min = np.min(np.where(aligned_unaff_mask == 1)[0])
+            unaff_x_min = np.min(np.where(aligned_unaff_mask == 1)[1])  # Leftmost point
+
+        # Mark the lowest points of both masks
+        ax.plot(affected_x_min, affected_y_min, 'go', label='Affected Mask Alignment')
+        ax.plot(unaff_x_min, unaff_y_min, 'ro', label='Unaffected Mask Alignment')
+
+        # Add arrows for the height and width differences
+        ax.arrow(affected_y_min, affected_y_min, 0, height_diff, head_width=10, head_length=5, fc='green', ec='green')
+        ax.arrow(affected_x_min, affected_x_min, width_diff, 0, head_width=10, head_length=5, fc='blue', ec='blue')
+
+        # Add text for deformity index
+        ax.text(0.5, 0.05, f'Deformity Index: {self.deformity_index:.2f}', ha='center', va='center', fontsize=14,
+                color='black', transform=ax.transAxes)
+
+        # Set labels and title
+        ax.set_title('Deformity Index Visualization')
+        ax.set_xlabel('X-axis')
+        ax.set_ylabel('Y-axis')
+
+        # Show the legend
+        ax.legend(loc='upper right')
+
+        # Save the visualization
+        debug_path = self.output_folder / f"{self.data['patient_id']}_{self.data['timepoint']}_deformity_index.png"
+        plt.savefig(debug_path, bbox_inches='tight')
+        plt.close(fig)
+
+        return debug_path
 
     def visualize(self):
         """Visualize rotated masks with pillar divisions and axes."""
@@ -374,6 +479,7 @@ class FemoralHeadAnalyzer:
         plt.savefig(vis_path, bbox_inches='tight')
         plt.close()
         return vis_path
+
     def save_to_excel(self, filename: str, output_dir: str = None) -> Path:
         """
         Save all measurements to Excel file in specified output directory.
@@ -388,15 +494,18 @@ class FemoralHeadAnalyzer:
         """
         if not self.pillar_measurements or not self.eq_measurements:
             raise RuntimeError("Run measure_pillars() and measure_epiphyseal_quotient() first")
+        if self.deformity_index is None:
+            raise RuntimeError("Run calculate_deformity_index() first")
 
-        # Create data row
+        # Create data row with deformity index
         row = {
             'patient_id': self.data['patient_id'],
             'timepoint': self.data['timepoint'],
             'orientation': self.data['orientation'],
             'dist': self.data['dist'],
             **self.pillar_measurements,
-            **self.eq_measurements
+            **self.eq_measurements,
+            'deformity_index': self.deformity_index  # Add deformity index
         }
 
         # Determine output directory
@@ -419,18 +528,15 @@ class FemoralHeadAnalyzer:
     def process(self):
         """Complete processing pipeline for a single patient/timepoint."""
         # Perform alignment
-        angle = self.align_major_axis()
-
-        # Visualize results
-        vis_path = self.visualize()
-
-        # Add rotation angle to data
-        self.data['rotation_angle'] = angle
+        self.align_major_axis()
 
         # Continue with measurements
         self.measure_pillars()
         self.measure_epiphyseal_quotient()
+        self.calculate_deformity_index(visualize=True)  # Calculate and visualize deformity index
+
+        # Visualize results
+        vis_path = self.visualize()
         excel_path = self.save_to_excel("results.xlsx")
 
         return vis_path, excel_path
-

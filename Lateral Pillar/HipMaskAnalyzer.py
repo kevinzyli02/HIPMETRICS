@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from skimage.transform import rotate
@@ -9,14 +11,20 @@ class HipMaskAnalyzer:
     Analyze hip masks: rotate to align major axes horizontally,
     measure pillar heights, compute ratios, visualize overlays, and save results.
     """
-    def __init__(self, results_list: List[Dict]):
-        """
-        results_list: list of dicts with keys:
-            'patient_id', 'timepoint', 'affected_mask', 'transformed_unaff_mask',
-            'aff_major_axis', 'unaff_major_axis', 'affected_laterality'
-        """
+
+    def __init__(self, results_list, output_folder):
+        # Accept single dictionary by converting to list
+        if isinstance(results_list, dict):
+            results_list = [results_list]
+
+        # Validate input type
+        if not isinstance(results_list, list) or not all(isinstance(item, dict) for item in results_list):
+            raise TypeError("results_list must be a list of dictionaries or a single dictionary")
+
         self.results_list = results_list
         self.results_df = None
+        self.output_folder = Path(output_folder)
+        self.output_folder.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _rotation_angle(axis: Tuple[Tuple[float, float], Tuple[float, float]]) -> float:
@@ -162,10 +170,44 @@ class HipMaskAnalyzer:
         plt.savefig(f'{patient_id}_{timepoint}_overlay.png')
         plt.close(fig)
 
-    def save_to_excel(self, filename: str):
+    def save_to_excel(self, filename: str, output_dir: str = None) -> Path:
         """
-        Save the results DataFrame to an Excel file.
+        Save all measurements to Excel file in specified output directory.
+        Appends to existing file or creates new one. Returns path to saved file.
+
+        Args:
+            filename: Excel file name (e.g., "results.xlsx")
+            output_dir: Directory to save file (default: class output_folder)
+
+        Returns:
+            Path to saved Excel file
         """
-        if self.results_df is None:
-            raise RuntimeError("No results to save. Run analyze() first.")
-        self.results_df.to_excel(filename, index=False)
+        if not self.pillar_measurements or not self.eq_measurements:
+            raise RuntimeError("Run measure_pillars() and measure_epiphyseal_quotient() first")
+
+        # Create data row
+        row = {
+            'patient_id': self.data['patient_id'],
+            'timepoint': self.data['timepoint'],
+            'orientation': self.data['orientation'],
+            'dist': self.data['dist'],
+            **self.pillar_measurements,
+            **self.eq_measurements
+        }
+
+        # Determine output directory
+        target_dir = Path(output_dir) if output_dir else self.output_folder
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create full filepath
+        excel_path = target_dir / filename
+
+        # Create or append to Excel
+        if excel_path.exists():
+            df = pd.read_excel(excel_path)
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        else:
+            df = pd.DataFrame([row])
+
+        df.to_excel(excel_path, index=False)
+        return excel_path
