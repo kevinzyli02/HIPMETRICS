@@ -1,6 +1,6 @@
 import os
 from pseudoaxisalignment import process_all_femoral_heads
-from PerthesMeasurementIntermediate import PerthesMeasurements
+from PerthesMeasurementIntermediate import FemoralHeadAnalyzer
 
 # File Paths for COCO_JSON(Annotations), image folder, and output destination
 coco_json_path = r'C:\Users\SR207348\Downloads\labels_ipsg102_2025-06-30-08-40-52.json'
@@ -18,23 +18,12 @@ aligned_results = process_all_femoral_heads(
     )
 
 # Initialize and calculate measurements
-pm = PerthesMeasurements(aligned_results, output_folder)
-pm.calculate_all_measurements()
-
-# Generate comprehensive report
-pm.generate_reports()
-
-# # Or visualize individual case
-# measurement = pm.measurements[0]
-# pm.visualize_measurements(measurement)  # Shows interactive plot
-# pm.visualize_lateral_pillar(measurement, 'affected')  # Just affected lateral pillar
-
-# # Access results as DataFrame
-# measurements_df = pm.to_dataframe()
-# print(measurements_df.head())
-#
-# # Save to CSV
-# pm.to_csv(os.path.join(output_folder, 'perthes_measurements.csv'))
+for result in aligned_results:
+    analyzer = FemoralHeadAnalyzer(result)
+    analyzer.align_major_axis()
+    analyzer.measure_pillars()
+    analyzer.visualize(save_path=f"vis_{result['patient_id']}_{result['timepoint']}.png")
+    analyzer.save_to_excel("measurements.xlsx")
 
 
 

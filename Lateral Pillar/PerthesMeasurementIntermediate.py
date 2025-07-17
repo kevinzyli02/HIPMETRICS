@@ -1,144 +1,111 @@
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import os
 import cv2
-import math
+import matplotlib.pyplot as plt
+from skimage.transform import rotate
+import pandas as pd
+import os
+from pathlib import Path
 
 
-class PerthesMeasurements:
-    def __init__(self, aligned_results, output_dir):
+class FemoralHeadAnalyzer:
+    def __init__(self, result_dict, output_folder):
         """
-        Initialize with aligned femoral head results.
+        Initialize with a results dictionary for one patient/timepoint.
 
         Args:
-            aligned_results (list): List of dictionaries from femoral head alignment
-            output_dir (str): Directory to save reports
+            result_dict (dict): Dictionary containing patient data and masks
+            output_folder (str): Path to save visualizations and Excel files
         """
-        self.aligned_results = aligned_results
-        self.output_dir = output_dir
-        self.measurements = []
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.data = result_dict
+        self.output_folder = Path(output_folder)
+        self.output_folder.mkdir(parents=True, exist_ok=True)
 
-    def _get_rotation_angle(self, major_axis_endpoints):
-        """
-        Calculate rotation angle to make major axis horizontal.
+        self.rotated_aff_mask = None
+        self.rotated_unaff_mask = None
+        self.pillar_measurements = {}
+        self.eq_measurements = {}
 
-        Args:
-            major_axis_endpoints (tuple): ((x1,y1),(x2,y2)) of major axis
+    def _compute_rotation_angle(self, axis_endpoints):
+        """Calculate rotation angle to make major axis horizontal."""
+        (x1, y1), (x2, y2) = axis_endpoints
+        dx, dy = x2 - x1, y2 - y1
+        return -np.degrees(np.arctan2(dy, dx))  # Negative to counter-clockwise rotation
 
-        Returns:
-            float: Rotation angle in degrees
-        """
-        p1, p2 = major_axis_endpoints
-        dx = p2[0] - p1[0]
-        dy = p2[1] - p1[1]
+    def _rotate_mask(self, mask, angle):
+        """Rotate mask around its center of mass."""
+        # Calculate center of mass
+        y_indices, x_indices = np.where(mask)
+        if len(y_indices) == 0 or len(x_indices) == 0:
+            return mask  # Return original if empty mask
+        cx, cy = np.mean(x_indices), np.mean(y_indices)
+        # Rotate mask around COM
+        rotated = rotate(mask.astype(float), angle, center=(cx, cy),
+                         preserve_range=True, mode='constant', cval=0)
+        return rotated > 0.5  # Re-binarize mask
 
-        # Calculate angle in radians
-        angle_rad = math.atan2(dy, dx)
+    def align_major_axis(self):
+        """Rotate masks to make affected major axis horizontal."""
+        # Calculate rotation angle from affected major axis
+        angle = self._compute_rotation_angle(self.data['aff_major_axis'])
 
-        # Convert to degrees and ensure horizontal orientation
-        angle_deg = math.degrees(angle_rad)
+        # Rotate both masks
+        self.rotated_aff_mask = self._rotate_mask(
+            self.data['affected_mask'], angle
+        )
+        self.rotated_unaff_mask = self._rotate_mask(
+            self.data['transformed_unaff_mask'], angle
+        )
 
-        # Normalize to horizontal orientation (0° or 180°)
-        if abs(angle_deg) > 45 and abs(angle_deg) < 135:
-            angle_deg += 90
+    def _calculate_pillar_heights(self, mask, laterality):
+        """Measure max and average heights for lateral, middle, medial pillars."""
+        # Get bounding box of non-zero region
+        coords = np.argwhere(mask)
+        if coords.size == 0:
+            return [0, 0, 0, 0, 0, 0]  # Handle empty mask
 
-        return -angle_deg  # Negative for clockwise rotation
+        min_y, min_x = coords.min(axis=0)
+        max_y, max_x = coords.max(axis=0)
+        width = max_x - min_x
 
-    def _rotate_mask(self, mask, angle_deg):
-        """
-        Rotate mask around its center of mass.
+        # Define pillar boundaries
+        thirds = [min_x, min_x + width / 3, min_x + 2 * width / 3, max_x]
 
-        Args:
-            mask (ndarray): Binary mask
-            angle_deg (float): Rotation angle in degrees
+        # Determine pillar order based on laterality
+        if laterality == 'R':
+            pillars = [('lateral', thirds[0], thirds[1]),
+                       ('middle', thirds[1], thirds[2]),
+                       ('medial', thirds[2], thirds[3])]
+        else:  # 'L'
+            pillars = [('medial', thirds[0], thirds[1]),
+                       ('middle', thirds[1], thirds[2]),
+                       ('lateral', thirds[2], thirds[3])]
 
-        Returns:
-            rotated_mask: Rotated binary mask
-        """
-        # Find center of mass
+        # Measure heights for each pillar
+        results = []
+        for name, start, end in pillars:
+            pillar_mask = mask[:, int(start):int(end) + 1]
+            heights = []
+            for col in range(pillar_mask.shape[1]):
+                col_mask = pillar_mask[:, col]
+                if np.any(col_mask):
+                    y_indices = np.where(col_mask)[0]
+                    height = y_indices.max() - y_indices.min() + 1
+                    heights.append(height)
+
+            max_height = np.max(heights) if heights else 0
+            avg_height = np.mean(heights) if heights else 0
+            results.extend([max_height, avg_height])
+
+        return results
+
+    def _calculate_epiphyseal_quotient(self, mask):
+        """Calculate height/width ratio for femoral head mask."""
         coords = np.argwhere(mask)
         if len(coords) == 0:
-            return mask
-
-        center_yx = np.mean(coords, axis=0)
-        center_xy = (center_yx[1], center_yx[0])  # Convert to (x, y)
-
-        # Create rotation matrix
-        rotation_matrix = cv2.getRotationMatrix2D(
-            center_xy,
-            angle_deg,
-            1.0  # scale
-        )
-
-        # Apply rotation
-        rotated = cv2.warpAffine(
-            mask.astype(np.uint8) * 255,
-            rotation_matrix,
-            (mask.shape[1], mask.shape[0]),  # (width, height)
-            flags=cv2.INTER_NEAREST
-        )
-
-        return rotated > 127
-
-    def _get_lateral_pillar_height(self, rotated_mask, side):
-        """
-        Calculate lateral pillar height from rotated mask.
-
-        Args:
-            rotated_mask (ndarray): Mask with major axis horizontal
-            side (str): 'left' or 'right'
-
-        Returns:
-            float: Maximum height in lateral third
-        """
-        # Get bounding box of non-zero regions
-        coords = np.argwhere(rotated_mask)
-        if len(coords) == 0:
-            return 0.0
-
-        min_y, min_x = np.min(coords, axis=0)
-        max_y, max_x = np.max(coords, axis=0)
-
-        width = max_x - min_x
-        lateral_third = width // 3
-
-        if side == 'right':
-            x_start = max_x - lateral_third
-            x_end = max_x
-        else:  # left
-            x_start = min_x
-            x_end = min_x + lateral_third
-
-        # Extract lateral third region
-        strip = rotated_mask[min_y:max_y + 1, x_start:x_end]
-        if not np.any(strip):
-            return 0.0
-
-        # Find top and bottom edges
-        y_coords = np.where(strip.any(axis=1))[0]
-        if len(y_coords) == 0:
-            return 0.0
-
-        return y_coords[-1] - y_coords[0] + 1
-
-    def _get_epiphyseal_quotient(self, rotated_mask):
-        """
-        Calculate EQ from rotated mask.
-
-        Args:
-            rotated_mask (ndarray): Mask with major axis horizontal
-
-        Returns:
-            tuple: (EQ, height, width)
-        """
-        points = np.argwhere(rotated_mask)
-        if len(points) < 2:
             return 0.0, 0.0, 0.0
 
-        min_y, min_x = np.min(points, axis=0)
-        max_y, max_x = np.max(points, axis=0)
+        min_y, min_x = coords.min(axis=0)
+        max_y, max_x = coords.max(axis=0)
 
         width = max_x - min_x
         height = max_y - min_y
@@ -148,201 +115,147 @@ class PerthesMeasurements:
         else:
             eq = 0.0
 
-        return eq, height, width
+        return eq, width, height
 
-    def calculate_all_measurements(self):
-        """
-        Calculate all Perthes measurements for all aligned results.
-        """
-        self.measurements = []
+    def measure_pillars(self):
+        """Calculate pillar heights for both masks and ratios."""
+        # Measure heights for affected and unaffected masks
+        aff_heights = self._calculate_pillar_heights(
+            self.rotated_aff_mask, self.data['affected_laterality']
+        )
+        unaff_heights = self._calculate_pillar_heights(
+            self.rotated_unaff_mask, self.data['unaffected_laterality']
+        )
 
-        for result in self.aligned_results:
-            # Get rotation angle from affected head
-            angle = self._get_rotation_angle(result['aff_major_axis'])
+        # Calculate ratios (avoid division by zero)
+        ratios = []
+        for aff_val, unaff_val in zip(aff_heights, unaff_heights):
+            ratio = aff_val / unaff_val if unaff_val != 0 else float('nan')
+            ratios.append(ratio)
 
-            # Rotate both masks using the same angle
-            aff_rotated = self._rotate_mask(result['affected_mask'], angle)
-            unaff_rotated = self._rotate_mask(result['transformed_unaff_mask'], angle)
+        # Store measurements
+        pillar_types = ['lateral_max', 'lateral_avg',
+                        'middle_max', 'middle_avg',
+                        'medial_max', 'medial_avg']
 
-            # Get sides
-            aff_side = result['affected_laterality'].lower()
-            unaff_side = result['unaffected_laterality'].lower()
+        self.pillar_measurements = {
+            'aff_' + k: v for k, v in zip(pillar_types, aff_heights)
+        }
+        self.pillar_measurements.update({
+            'unaff_' + k: v for k, v in zip(pillar_types, unaff_heights)
+        })
+        self.pillar_measurements.update({
+            'ratio_' + k: v for k, v in zip(pillar_types, ratios)
+        })
 
-            # Process affected head
-            aff_lp_height = self._get_lateral_pillar_height(aff_rotated, aff_side)
-            aff_eq, aff_height, aff_width = self._get_epiphyseal_quotient(aff_rotated)
+    def measure_epiphyseal_quotient(self):
+        """Calculate EQ (height/width) for both femoral heads."""
+        # Calculate EQ for affected head
+        aff_eq, aff_width, aff_height = self._calculate_epiphyseal_quotient(self.rotated_aff_mask)
+        unaff_eq, unaff_width, unaff_height = self._calculate_epiphyseal_quotient(self.rotated_unaff_mask)
 
-            # Process unaffected head
-            unaff_lp_height = self._get_lateral_pillar_height(unaff_rotated, unaff_side)
-            unaff_eq, unaff_height, unaff_width = self._get_epiphyseal_quotient(unaff_rotated)
+        # Calculate ratio
+        eq_ratio = aff_eq / unaff_eq if unaff_eq != 0 else float('nan')
 
-            # Calculate ratios
-            if unaff_lp_height > 0:
-                lp_ratio = aff_lp_height / unaff_lp_height
-            else:
-                lp_ratio = float('nan')
+        # Store measurements
+        self.eq_measurements = {
+            'aff_eq': aff_eq,
+            'aff_width': aff_width,
+            'aff_height': aff_height,
+            'unaff_eq': unaff_eq,
+            'unaff_width': unaff_width,
+            'unaff_height': unaff_height,
+            'eq_ratio': eq_ratio
+        }
 
-            if unaff_eq > 0:
-                di = 1 - (aff_eq / unaff_eq)
-            else:
-                di = float('nan')
+    def visualize(self):
+        """Visualize rotated masks with pillar divisions and axes."""
+        if self.rotated_aff_mask is None:
+            raise RuntimeError("Run align_major_axis() first")
 
-            # Store measurements
-            self.measurements.append({
-                'patient_id': result['patient_id'],
-                'timepoint': result['timepoint'],
-                'affected_lateral': aff_lp_height,
-                'unaffected_lateral': unaff_lp_height,
-                'LP_ratio': lp_ratio,
-                'affected_EQ': aff_eq,
-                'unaffected_EQ': unaff_eq,
-                'affected_height': aff_height,
-                'affected_width': aff_width,
-                'unaffected_height': unaff_height,
-                'unaffected_width': unaff_width,
-                'deformity_index': di,
-                'com_distance': result['dist'],
-                'affected_side': aff_side,
-                'unaffected_side': unaff_side,
-                'rotated_affected': aff_rotated,
-                'rotated_unaffected': unaff_rotated,
-                'result_data': result
-            })
+        # Create RGB overlay
+        overlay = np.zeros((*self.rotated_aff_mask.shape, 3), dtype=np.uint8)
+        overlay[self.rotated_aff_mask] = [255, 0, 0]  # Red for affected
+        overlay[self.rotated_unaff_mask] = [0, 255, 0]  # Green for unaffected
 
-    def _create_visualization(self, measurement):
-        """
-        Create visualization for one measurement case.
+        # Get bounding boxes
+        def get_bbox(mask):
+            coords = np.argwhere(mask)
+            if len(coords) == 0:
+                return (0, 0, 0, 0)
+            x_min, y_min = coords.min(axis=0)[::-1]
+            x_max, y_max = coords.max(axis=0)[::-1]
+            return (x_min, y_min, x_max, y_max)
 
-        Returns:
-            fig: Matplotlib figure
-        """
-        fig = plt.figure(figsize=(18, 6))
-        gs = fig.add_gridspec(1, 3)
+        aff_bbox = get_bbox(self.rotated_aff_mask)
+        unaff_bbox = get_bbox(self.rotated_unaff_mask)
 
-        # Panel 1: Unaffected side
-        ax1 = fig.add_subplot(gs[0, 0])
-        self._plot_head(ax1,
-                        measurement['rotated_unaffected'],
-                        f"Unaffected {measurement['unaffected_side'].capitalize()} Head",
-                        'blue',
-                        measurement['unaffected_side'])
+        # Draw pillar divisions for affected head
+        if aff_bbox[2] - aff_bbox[0] > 0:  # Check if valid bbox
+            width = aff_bbox[2] - aff_bbox[0]
+            div1 = aff_bbox[0] + width / 3
+            div2 = aff_bbox[0] + 2 * width / 3
 
-        # Panel 2: Affected side with overlay
-        ax2 = fig.add_subplot(gs[0, 1])
-        self._plot_head(ax2,
-                        measurement['rotated_affected'],
-                        f"Affected {measurement['affected_side'].capitalize()} Head",
-                        'red',
-                        measurement['affected_side'])
-        # Overlay unaffected in blue with transparency
-        self._plot_head(ax2,
-                        measurement['rotated_unaffected'],
-                        None,
-                        'blue',
-                        measurement['unaffected_side'],
-                        alpha=0.3)
+            # Draw lines
+            cv2.line(overlay, (int(div1), 0), (int(div1), overlay.shape[0]),
+                     (255, 255, 255), 2)
+            cv2.line(overlay, (int(div2), 0), (int(div2), overlay.shape[0]),
+                     (255, 255, 255), 2)
 
-        # Panel 3: Measurements
-        ax3 = fig.add_subplot(gs[0, 2])
-        self._plot_measurements(ax3, measurement)
+        # Draw bounding boxes and major axes
+        for bbox, color in zip([aff_bbox, unaff_bbox], [(0, 0, 255), (0, 255, 255)]):
+            if bbox[2] - bbox[0] > 0:  # Only draw if valid
+                # Draw bounding box
+                cv2.rectangle(overlay, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 1)
 
-        plt.tight_layout()
-        return fig
+                # Draw major axis (horizontal)
+                y_center = (bbox[1] + bbox[3]) // 2
+                cv2.line(overlay, (bbox[0], y_center), (bbox[2], y_center), color, 2)
 
-    def _plot_head(self, ax, mask, title, color, side, alpha=1.0):
-        """Plot a single head mask without flipping."""
-        # Create RGB image
-        rgb = np.zeros((*mask.shape, 3))
-        if color == 'red':
-            rgb[mask] = [1, 0, 0]
-        else:  # blue
-            rgb[mask] = [0, 0, 1]
+        # Create and save visualization
+        plt.figure(figsize=(10, 8))
+        plt.title(f"Patient {self.data['patient_id']} - {self.data['timepoint']}")
+        plt.imshow(overlay)
+        plt.axis('off')
 
-        # Display without flipping
-        ax.imshow(rgb, alpha=alpha, origin='upper')
-        if title:
-            ax.set_title(title)
-        ax.axis('off')
+        # Save to output folder
+        vis_path = self.output_folder / f"{self.data['patient_id']}_{self.data['timepoint']}_vis.png"
+        plt.savefig(vis_path, bbox_inches='tight')
+        plt.close()
+        return vis_path
 
-        # Add lateral third indicator
-        width = mask.shape[1]
-        lateral_third = width // 3
-        if side == 'right':
-            ax.axvline(width - lateral_third, color='yellow', linestyle='--')
+    def save_to_excel(self):
+        """Save all measurements to Excel file in output folder."""
+        if not self.pillar_measurements or not self.eq_measurements:
+            raise RuntimeError("Run measure_pillars() and measure_epiphyseal_quotient() first")
+
+        # Create data row
+        row = {
+            'patient_id': self.data['patient_id'],
+            'timepoint': self.data['timepoint'],
+            'orientation': self.data['orientation'],
+            'dist': self.data['dist'],
+            **self.pillar_measurements,
+            **self.eq_measurements
+        }
+
+        excel_path = self.output_folder / "measurements.xlsx"
+
+        # Create or append to Excel
+        if excel_path.exists():
+            df = pd.read_excel(excel_path)
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
         else:
-            ax.axvline(lateral_third, color='yellow', linestyle='--')
-
-        # Add height indicator
-        coords = np.argwhere(mask)
-        if len(coords) > 0:
-            min_y, min_x = np.min(coords, axis=0)
-            max_y, max_x = np.max(coords, axis=0)
-            height = max_y - min_y + 1
-            width = max_x - min_x + 1
-
-            # Place width at bottom
-            ax.text(min_x + width // 2, max_y + 5, f"W: {width:.1f}",
-                    color='white', fontsize=10, ha='center',
-                    bbox=dict(facecolor='black', alpha=0.5))
-
-            # Place height on right side
-            ax.text(max_x + 5, min_y + height // 2, f"H: {height:.1f}",
-                    color='white', fontsize=10, va='center', rotation=270,
-                    bbox=dict(facecolor='black', alpha=0.5))
-
-    def _plot_measurements(self, ax, measurement):
-        """Plot measurement summary."""
-        ax.axis('off')
-        ax.set_title("Measurement Summary", fontsize=16)
-
-        # Create text content
-        text_content = [
-            f"Patient: {measurement['patient_id']}",
-            f"Timepoint: {measurement['timepoint']}",
-            "",
-            "Lateral Pillar:",
-            f"Affected height: {measurement['affected_lateral']:.1f} px",
-            f"Unaffected height: {measurement['unaffected_lateral']:.1f} px",
-            f"LP Ratio: {measurement['LP_ratio']:.2f}",
-            "",
-            "Epiphyseal Quotient:",
-            f"Affected EQ: {measurement['affected_EQ']:.2f}",
-            f"Unaffected EQ: {measurement['unaffected_EQ']:.2f}",
-            f"Deformity Index: {measurement['deformity_index']:.2f}",
-            "",
-            f"COM Distance: {measurement['com_distance']:.1f} px"
-        ]
-
-        # Add text to axis
-        ax.text(0.5, 0.5, "\n".join(text_content),
-                fontsize=14,
-                ha='center', va='center',
-                bbox=dict(facecolor='lightgray', alpha=0.5))
-
-    def generate_reports(self):
-        """Generate all reports and save Excel file."""
-        self.calculate_all_measurements()
-
-        # Save Excel file
-        excel_path = os.path.join(self.output_dir, 'perthes_measurements.xlsx')
-        df = pd.DataFrame(self.measurements)
-
-        # Drop image data before saving to Excel
-        cols_to_drop = ['rotated_affected', 'rotated_unaffected', 'result_data']
-        for col in cols_to_drop:
-            if col in df.columns:
-                df = df.drop(columns=[col])
+            df = pd.DataFrame([row])
 
         df.to_excel(excel_path, index=False)
+        return excel_path
 
-        # Generate visual reports
-        for measurement in self.measurements:
-            fig = self._create_visualization(measurement)
-            report_path = os.path.join(
-                self.output_dir,
-                f"patient_{measurement['patient_id']}_{measurement['timepoint']}_report.png"
-            )
-            fig.savefig(report_path, bbox_inches='tight', dpi=150)
-            plt.close(fig)
-
-        print(f"Generated {len(self.measurements)} reports in {self.output_dir}")
+    def process(self):
+        """Complete processing pipeline for a single patient/timepoint."""
+        self.align_major_axis()
+        self.measure_pillars()
+        self.measure_epiphyseal_quotient()
+        vis_path = self.visualize()
+        excel_path = self.save_to_excel()
+        return vis_path, excel_path
