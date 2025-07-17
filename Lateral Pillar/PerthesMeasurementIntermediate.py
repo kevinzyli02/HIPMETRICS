@@ -6,7 +6,6 @@ import pandas as pd
 import os
 from pathlib import Path
 
-
 class FemoralHeadAnalyzer:
     def __init__(self, result_dict, output_folder):
         """
@@ -24,37 +23,192 @@ class FemoralHeadAnalyzer:
         self.rotated_unaff_mask = None
         self.pillar_measurements = {}
         self.eq_measurements = {}
-
     def _compute_rotation_angle(self, axis_endpoints):
         """Calculate rotation angle to make major axis horizontal."""
         (x1, y1), (x2, y2) = axis_endpoints
         dx, dy = x2 - x1, y2 - y1
-        return -np.degrees(np.arctan2(dy, dx))  # Negative to counter-clockwise rotation
+        return np.degrees(np.arctan2(dy, dx))  # Negative to counter-clockwise rotation
+    def _rotate_mask(self, mask, angle, center=None):
+        """
+        Rotate mask around a specified center.
 
-    def _rotate_mask(self, mask, angle):
-        """Rotate mask around its center of mass."""
+        Args:
+            mask: Binary mask to rotate
+            angle: Rotation angle in degrees
+            center: Custom rotation center (x, y). If None, uses center of mass.
+        """
+        # Use custom center if provided, else calculate center of mass
+        if center is None:
+            y_indices, x_indices = np.where(mask)
+            if len(y_indices) == 0 or len(x_indices) == 0:
+                return mask
+            cx, cy = np.mean(x_indices), np.mean(y_indices)
+        else:
+            cx, cy = center
+
+        # Rotate mask around the specified center
+        rotated = rotate(
+            mask.astype(float),
+            angle,
+            center=(cx, cy),
+            preserve_range=True,
+            mode='constant',
+            cval=0
+        )
+        return rotated > 0.5
+    def _get_major_axis_center(self, axis_endpoints):
+        """Calculate midpoint of major axis"""
+        (x1, y1), (x2, y2) = axis_endpoints
+        return ((x1 + x2) / 2, (y1 + y2) / 2)
+    def align_major_axis(self):
+        """Rotate masks around center of major axis to make it horizontal"""
+        # Calculate rotation angle
+        angle = self._compute_rotation_angle(self.data['aff_major_axis'])
+
+        # Get rotation centers
+        aff_center = self._get_major_axis_center(self.data['aff_major_axis'])
+        unaff_center = self._get_major_axis_center(self.data['trans_unaff_major_axis'])
+
+        # Rotate both masks using their respective major axis centers
+        self.rotated_aff_mask = self._rotate_mask(
+            self.data['affected_mask'], angle, center=aff_center
+        )
+        self.rotated_unaff_mask = self._rotate_mask(
+            self.data['transformed_unaff_mask'], angle, center=unaff_center
+        )
+
+        # Visualize rotation
+        return self._visualize_rotation(angle, aff_center, unaff_center)
+
+    def _visualize_rotation(self, angle, aff_center, unaff_center):
+        """Visualize rotation centers and results"""
+        fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+
+        # Original affected mask
+        ax = axes[0, 0]
+        ax.imshow(self.data['affected_mask'], cmap='gray')
+        (x1, y1), (x2, y2) = self.data['aff_major_axis']
+        ax.plot([x1, x2], [y1, y2], 'r-', linewidth=2)
+        ax.scatter([x1, x2], [y1, y2], c=['red', 'blue'], s=50)
+        ax.scatter(aff_center[0], aff_center[1], c='yellow', s=100, marker='*')
+        ax.set_title("Affected Head - Original")
+
+        # Original unaffected mask
+        ax = axes[0, 1]
+        ax.imshow(self.data['transformed_unaff_mask'], cmap='gray')
+        (x1, y1), (x2, y2) = self.data['trans_unaff_major_axis']
+        ax.plot([x1, x2], [y1, y2], 'r-', linewidth=2)
+        ax.scatter([x1, x2], [y1, y2], c=['red', 'blue'], s=50)
+        ax.scatter(unaff_center[0], unaff_center[1], c='yellow', s=100, marker='*')
+        ax.set_title("Unaffected Head - Original")
+
+
+
+        # Rotated affected mask
+        ax = axes[1, 0]
+        ax.imshow(self.rotated_aff_mask, cmap='gray')
+
+        # Draw horizontal line at rotation center
+        ax.axhline(aff_center[1], color='cyan', linestyle='--', alpha=0.5)
+        ax.scatter(aff_center[0], aff_center[1], c='yellow', s=100, marker='*')
+        ax.set_title(f"Affected Head - Rotated ({angle:.1f}°)")
+
+        # Rotated unaffected mask
+        ax = axes[1, 1]
+        ax.imshow(self.rotated_unaff_mask, cmap='gray')
+        ax.axhline(unaff_center[1], color='cyan', linestyle='--', alpha=0.5)
+        ax.scatter(unaff_center[0], unaff_center[1], c='yellow', s=100, marker='*')
+        ax.set_title(f"Unaffected Head - Rotated ({angle:.1f}°)")
+
+        # Save visualization
+        debug_path = self.output_folder / f"{self.data['patient_id']}_{self.data['timepoint']}_axis_rotation.png"
+        plt.tight_layout()
+        plt.savefig(debug_path, bbox_inches='tight')
+        plt.close(fig)
+
+        return debug_path
+    def _visualize_axis_endpoints(self, mask, axis_endpoints, title):
+        """Visualize mask with axis endpoints marked"""
+        plt.figure(figsize=(6, 6))
+        plt.imshow(mask, cmap='gray')
+
+        # Unpack endpoints
+        try:
+            (x1, y1), (x2, y2) = axis_endpoints
+            plt.scatter([x1, x2], [y1, y2], c=['red', 'blue'], s=50)
+            plt.plot([x1, x2], [y1, y2], 'g-', linewidth=2)
+            plt.title(f"{title}\n({x1:.1f},{y1:.1f}) to ({x2:.1f},{y2:.1f})")
+        except Exception as e:
+            plt.title(f"Error: {e}")
+
+        plt.axis('off')
+        debug_path = self.output_folder / f"{title.replace(' ', '_')}_axis_debug.png"
+        plt.savefig(debug_path, bbox_inches='tight')
+        plt.close()
+        print(f"Saved axis debug: {debug_path}")
+    def _draw_major_axis(self, mask, axis_endpoints, color=(0, 255, 0)):
+        """Draw major axis on a mask and return as RGB image"""
+        # Convert to RGB
+        rgb = np.stack([mask] * 3, axis=-1).astype(np.uint8) * 255
+        # Draw axis line
+        (x1, y1), (x2, y2) = axis_endpoints
+        pt1 = (int(x1), int(y1))
+        pt2 = (int(x2), int(y2))
+        cv2.line(rgb, pt1, pt2, color, 2)
+        # Draw endpoints
+        cv2.circle(rgb, pt1, 5, (255, 0, 0), -1)
+        cv2.circle(rgb, pt2, 5, (0, 0, 255), -1)
+        return rgb
+    def _rotate_axis(self, axis_endpoints, mask, angle):
+        """Rotate axis endpoints using the same transformation as the mask"""
         # Calculate center of mass
         y_indices, x_indices = np.where(mask)
         if len(y_indices) == 0 or len(x_indices) == 0:
-            return mask  # Return original if empty mask
+            return axis_endpoints
         cx, cy = np.mean(x_indices), np.mean(y_indices)
-        # Rotate mask around COM
-        rotated = rotate(mask.astype(float), angle, center=(cx, cy),
-                         preserve_range=True, mode='constant', cval=0)
-        return rotated > 0.5  # Re-binarize mask
 
-    def align_major_axis(self):
-        """Rotate masks to make affected major axis horizontal."""
-        # Calculate rotation angle from affected major axis
-        angle = self._compute_rotation_angle(self.data['aff_major_axis'])
+        # Rotate both points
+        (x1, y1), (x2, y2) = axis_endpoints
+        p1_rot = self._rotate_point((x1, y1), (cx, cy), angle)
+        p2_rot = self._rotate_point((x2, y2), (cx, cy), angle)
 
-        # Rotate both masks
-        self.rotated_aff_mask = self._rotate_mask(
-            self.data['affected_mask'], angle
-        )
-        self.rotated_unaff_mask = self._rotate_mask(
-            self.data['transformed_unaff_mask'], angle
-        )
+        return (p1_rot, p2_rot)
+    def _rotate_point(self, point, center, angle_deg):
+        """Rotate a point around center by angle (degrees)"""
+        angle_rad = np.radians(angle_deg)
+        x, y = point
+        cx, cy = center
+
+        # Translate point to origin
+        x_translated = x - cx
+        y_translated = y - cy
+
+        # Apply rotation
+        x_rotated = x_translated * np.cos(angle_rad) - y_translated * np.sin(angle_rad)
+        y_rotated = x_translated * np.sin(angle_rad) + y_translated * np.cos(angle_rad)
+
+        # Translate back
+        return (x_rotated + cx, y_rotated + cy)
+    def _save_rotation_debug(self, orig_img, rot_img, patient_id, timepoint):
+        """Save rotation debug images"""
+        # Create figure
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+
+        # Plot original
+        ax1.imshow(orig_img)
+        ax1.set_title(f"Original - {patient_id} {timepoint}")
+        ax1.axis('off')
+
+        # Plot rotated
+        ax2.imshow(rot_img)
+        ax2.set_title(f"Rotated - {patient_id} {timepoint}")
+        ax2.axis('off')
+
+        # Save to file
+        debug_path = self.output_folder / f"{patient_id}_{timepoint}_rotation_debug.png"
+        plt.savefig(debug_path, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved rotation debug to: {debug_path}")
 
     def _calculate_pillar_heights(self, mask, laterality):
         """Measure max and average heights for lateral, middle, medial pillars."""
@@ -97,26 +251,6 @@ class FemoralHeadAnalyzer:
             results.extend([max_height, avg_height])
 
         return results
-
-    def _calculate_epiphyseal_quotient(self, mask):
-        """Calculate height/width ratio for femoral head mask."""
-        coords = np.argwhere(mask)
-        if len(coords) == 0:
-            return 0.0, 0.0, 0.0
-
-        min_y, min_x = coords.min(axis=0)
-        max_y, max_x = coords.max(axis=0)
-
-        width = max_x - min_x
-        height = max_y - min_y
-
-        if width > 0:
-            eq = height / width
-        else:
-            eq = 0.0
-
-        return eq, width, height
-
     def measure_pillars(self):
         """Calculate pillar heights for both masks and ratios."""
         # Measure heights for affected and unaffected masks
@@ -147,7 +281,24 @@ class FemoralHeadAnalyzer:
         self.pillar_measurements.update({
             'ratio_' + k: v for k, v in zip(pillar_types, ratios)
         })
+    def _calculate_epiphyseal_quotient(self, mask):
+        """Calculate height/width ratio for femoral head mask."""
+        coords = np.argwhere(mask)
+        if len(coords) == 0:
+            return 0.0, 0.0, 0.0
 
+        min_y, min_x = coords.min(axis=0)
+        max_y, max_x = coords.max(axis=0)
+
+        width = max_x - min_x
+        height = max_y - min_y
+
+        if width > 0:
+            eq = height / width
+        else:
+            eq = 0.0
+
+        return eq, width, height
     def measure_epiphyseal_quotient(self):
         """Calculate EQ (height/width) for both femoral heads."""
         # Calculate EQ for affected head
@@ -223,9 +374,18 @@ class FemoralHeadAnalyzer:
         plt.savefig(vis_path, bbox_inches='tight')
         plt.close()
         return vis_path
+    def save_to_excel(self, filename: str, output_dir: str = None) -> Path:
+        """
+        Save all measurements to Excel file in specified output directory.
+        Appends to existing file or creates new one. Returns path to saved file.
 
-    def save_to_excel(self):
-        """Save all measurements to Excel file in output folder."""
+        Args:
+            filename: Excel file name (e.g., "results.xlsx")
+            output_dir: Directory to save file (default: class output_folder)
+
+        Returns:
+            Path to saved Excel file
+        """
         if not self.pillar_measurements or not self.eq_measurements:
             raise RuntimeError("Run measure_pillars() and measure_epiphyseal_quotient() first")
 
@@ -239,7 +399,12 @@ class FemoralHeadAnalyzer:
             **self.eq_measurements
         }
 
-        excel_path = self.output_folder / "measurements.xlsx"
+        # Determine output directory
+        target_dir = Path(output_dir) if output_dir else self.output_folder
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create full filepath
+        excel_path = target_dir / filename
 
         # Create or append to Excel
         if excel_path.exists():
@@ -253,9 +418,19 @@ class FemoralHeadAnalyzer:
 
     def process(self):
         """Complete processing pipeline for a single patient/timepoint."""
-        self.align_major_axis()
+        # Perform alignment
+        angle = self.align_major_axis()
+
+        # Visualize results
+        vis_path = self.visualize()
+
+        # Add rotation angle to data
+        self.data['rotation_angle'] = angle
+
+        # Continue with measurements
         self.measure_pillars()
         self.measure_epiphyseal_quotient()
-        vis_path = self.visualize()
-        excel_path = self.save_to_excel()
+        excel_path = self.save_to_excel("results.xlsx")
+
         return vis_path, excel_path
+

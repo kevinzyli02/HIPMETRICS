@@ -88,6 +88,15 @@ def get_major_minor_axis(mask):
     proj = np.dot(vectors, u_minor)
     minor_length = np.max(proj) - np.min(proj)
 
+    # Calculate major axis endpoints
+    axis_length = 100  # pixels
+    end1 = center_xy + u_major * axis_length
+    end2 = center_xy - u_major * axis_length
+
+    # Ensure end1 has higher y-value than end2
+    if end1[1] < end2[1]:
+        end1, end2 = end2, end1  # Swap endpoints if needed
+
     return center_xy, u_major, minor_length, major_length
 
 
@@ -272,6 +281,10 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
         end1 = center_xy + u_major * axis_length
         end2 = center_xy - u_major * axis_length
 
+        # Ensure end1 has higher y-value than end2
+        if end1[1] < end2[1]:
+            end1, end2 = end2, end1  # Swap endpoints if needed
+
         # Store only necessary data
         heads.append({
             'image_info': img_info,
@@ -306,6 +319,10 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
     axis_length = 100
     flipped_end1 = flipped_center + flipped_u_major * axis_length
     flipped_end2 = flipped_center - flipped_u_major * axis_length
+
+    # Ensure flipped_end1 has higher y-value than flipped_end2
+    if flipped_end1[1] < flipped_end2[1]:
+        flipped_end1, flipped_end2 = flipped_end2, flipped_end1
 
     # Calculate rotation
     angle_aff = np.arctan2(affected['u_major'][1], affected['u_major'][0])
@@ -353,6 +370,10 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
     # Transform major axis endpoints
     trans_end1 = R @ (flipped_end1 - flipped_center) + affected['center_xy']
     trans_end2 = R @ (flipped_end2 - flipped_center) + affected['center_xy']
+
+    # Ensure trans_end1 has higher y-value than trans_end2
+    if trans_end1[1] < trans_end2[1]:
+        trans_end1, trans_end2 = trans_end2, trans_end1
 
     # Prepare results
     results = {

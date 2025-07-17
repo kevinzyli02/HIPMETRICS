@@ -13,18 +13,14 @@ aligned_results = process_all_femoral_heads(
         coco_json_path,
         image_folder,
         output_folder=output_folder,
-        visualize=True,
-        max_pairs=10  # Only process 10 hips
+        visualize=False,
+        max_pairs=3  # Only process 10 hips
     )
 
 # Initialize and calculate measurements
 for result in aligned_results:
-    analyzer = FemoralHeadAnalyzer(result)
-    analyzer.align_major_axis()
-    analyzer.measure_pillars()
-    analyzer.visualize(save_path=f"vis_{result['patient_id']}_{result['timepoint']}.png")
-    analyzer.save_to_excel("measurements.xlsx")
-
+    analyzer = FemoralHeadAnalyzer(result, output_folder)
+    analyzer.process()
 
 
 
