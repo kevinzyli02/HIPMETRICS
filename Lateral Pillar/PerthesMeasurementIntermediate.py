@@ -107,13 +107,23 @@ class FemoralHeadAnalyzer:
         # --- 180° rotation check for unaffected mask ---
         # Get original center of mass for unaffected mask
         com_orig = self.data['com_unaff_trans']  # (x, y)
+        com_orig_rot = self._rotate_point(com_orig, unaff_center, angle)
 
         # Calculate rotated COM positions
-        com_rotated = self._rotate_point(com_orig, unaff_center, angle)
+        com_rotated = self._rotate_point(com_orig_rot, unaff_center, angle)
         com_rotated_180 = self._rotate_point(com_rotated, unaff_center, 180)
 
-        # Compare y-values and rotate 180° if needed
-        if com_rotated_180[1] < com_rotated[1]:
+        # Calculate relative COM positions
+        aff_com_vector = np.array(self.data['com_aff']) - np.array(aff_center)
+        unaff_com_vector = np.array(com_rotated) - np.array(unaff_center)
+
+
+        # Get vertical directions (y-components)
+        aff_vertical_sign = np.sign(aff_com_vector[1])
+        unaff_vertical_sign0 = np.sign(unaff_com_vector[1])
+
+        # Flip if vertical orientations don't match
+        if aff_vertical_sign != unaff_vertical_sign0:
             self.rotated_unaff_mask = self._rotate_mask(
                 self.rotated_unaff_mask, 180, center=unaff_center
             )
@@ -121,13 +131,15 @@ class FemoralHeadAnalyzer:
                 self.rotated_aff_mask, 180, center=aff_center
             )
             self.unaff_flipped = True
+
         else:
             self.unaff_flipped = False
 
-        # Visualize rotation
-        return self._visualize_rotation(angle, aff_center, unaff_center, com_rotated,com_rotated_180)
 
-    def _visualize_rotation(self, angle, aff_center, unaff_center, com_rotated,com_rotated_180):
+        # Visualize rotation
+        return self._visualize_rotation(angle, aff_center, unaff_center, com_rotated, com_rotated_180, com_orig)
+
+    def _visualize_rotation(self, angle, aff_center, unaff_center, com_rotated,com_rotated_180, com_orig):
         """Visualize rotation centers and results"""
         fig, axes = plt.subplots(2, 2, figsize=(12, 12))
 
@@ -164,8 +176,10 @@ class FemoralHeadAnalyzer:
         ax.scatter(unaff_center[0], unaff_center[1], c='yellow', s=100, marker='*')
 
         # Add COM points
-        ax.scatter(com_rotated[0], com_rotated[1], c='green', s=100, marker='o')
-        ax.scatter(com_rotated_180[0], com_rotated_180[1], c='purple', s=100, marker='x')
+        ax.scatter(com_rotated[0], com_rotated[1], c='green', s=100, marker='.')
+        ax.scatter(com_rotated_180[0], com_rotated_180[1], c='purple', s=100, marker='.')
+        # ax.scatter(com_orig[0], com_orig[1], c='blue', s=100, marker='.') # troubleshooting com abnormalities
+
 
         title = f"Unaffected Head - Rotated ({angle:.1f}°)"
         if self.unaff_flipped:
@@ -291,148 +305,144 @@ class FemoralHeadAnalyzer:
             'eq_ratio': eq_ratio
         }
 
-    def calculate_deformity_index(self, visualize=False):
-        """
-        Calculate the deformity index and store it in self.deformity_index.
+    @staticmethod
+    def find_landmark(mask, laterality):
+        """Finds the landmark point (lowest and most lateral) in a mask."""
+        y_indices, x_indices = np.where(mask)
+        if len(y_indices) == 0:
+            return (0, 0)
+        max_y = np.max(y_indices)  # Lowest point (highest y-value)
+        x_at_max_y = x_indices[y_indices == max_y]
+        if laterality == 'R':
+            x_landmark = np.max(x_at_max_y)  # Rightmost
+        else:  # 'L'
+            x_landmark = np.min(x_at_max_y)  # Leftmost
+        return (int(x_landmark), int(max_y))
 
-        Parameters:
-        visualize (bool): Whether to visualize the deformity index calculation (default is False).
+    @staticmethod
+    def compute_boundaries(mask):
+        """Computes top/bottom profiles (per column) and left/right profiles (per row)."""
+        H, W = mask.shape
+        top = np.full(W, -1, dtype=int)  # -1 indicates no data
+        bottom = np.full(W, -1, dtype=int)
+        left = np.full(H, -1, dtype=int)
+        right = np.full(H, -1, dtype=int)
 
-        Returns:
-        float: Deformity index.
-        """
+        for x in range(W):
+            col = mask[:, x]
+            if np.any(col):
+                y_vals = np.where(col)[0]
+                top[x] = np.min(y_vals)
+                bottom[x] = np.max(y_vals)
+
+        for y in range(H):
+            row = mask[y, :]
+            if np.any(row):
+                x_vals = np.where(row)[0]
+                left[y] = np.min(x_vals)
+                right[y] = np.max(x_vals)
+
+        return top, bottom, left, right
+
+
+    def calculate_deformity_index(self):
+        # Get masks and laterality
         affected_mask = self.data['affected_mask']
         transformed_unaff_mask = self.data['transformed_unaff_mask']
-        laterality = self.data['affected_laterality']
-        unaff_width = self.eq_measurements['unaff_width']  # diameter of unaffected hip
+        affected_laterality = self.data['affected_laterality']
+        unaff_width = self.eq_measurements['unaff_width']
 
-        # Step 1: Find the lowest points for alignment
-        # Get the lowest y-point of the affected mask
-        affected_y_min = np.min(np.where(affected_mask == 1)[0])  # Y position of lowest point in affected mask
-        affected_x_min = np.min(np.where(affected_mask == 1)[1])  # X position of lowest point in affected mask
+        # Find landmarks - CORRECTED CALL (only 2 arguments now)
+        aff_landmark = self.find_landmark(affected_mask, affected_laterality)
+        unaff_landmark = self.find_landmark(transformed_unaff_mask, affected_laterality)
 
-        # Get the lowest y-point of the transformed unaffected mask (aligned based on laterality)
-        if laterality == 'R':  # Right side
-            unaff_y_min = np.min(np.where(transformed_unaff_mask == 1)[0])
-            unaff_x_min = np.max(np.where(transformed_unaff_mask == 1)[1])  # Rightmost point
-        else:  # Left side
-            unaff_y_min = np.min(np.where(transformed_unaff_mask == 1)[0])
-            unaff_x_min = np.min(np.where(transformed_unaff_mask == 1)[1])  # Leftmost point
 
-        # Step 2: Align the masks by translating the transformed unaffected mask
-        y_translation = affected_y_min - unaff_y_min
-        x_translation = affected_x_min - unaff_x_min
+        # Calculate integer shift
+        dx = int(round(aff_landmark[0] - unaff_landmark[0]))
+        dy = int(round(aff_landmark[1] - unaff_landmark[1]))
+        H, W = affected_mask.shape
 
-        # Translate the unaffected mask
-        aligned_unaff_mask = np.roll(transformed_unaff_mask, shift=(y_translation, x_translation), axis=(0, 1))
+        # Create padded canvas to accommodate shifts
+        min_x = min(0, dx)
+        max_x = max(W - 1, dx + W - 1)
+        min_y = min(0, dy)
+        max_y = max(H - 1, dy + H - 1)
+        new_width = max_x - min_x + 1
+        new_height = max_y - min_y + 1
 
-        # Step 3: Calculate bounding boxes for both masks
-        def get_bbox(mask):
-            coords = np.argwhere(mask)
-            if len(coords) == 0:
-                return (0, 0, 0, 0)
-            y_min, x_min = coords.min(axis=0)
-            y_max, x_max = coords.max(axis=0)
-            return (x_min, y_min, x_max, y_max)
+        aff_padded = np.zeros((new_height, new_width), dtype=bool)
+        unaff_padded = np.zeros((new_height, new_width), dtype=bool)
 
-        aff_bbox = get_bbox(affected_mask)
-        unaff_bbox = get_bbox(aligned_unaff_mask)
+        # Place masks in padded canvas
+        aff_padded[-min_y: -min_y + H, -min_x: -min_x + W] = affected_mask
+        unaff_padded[dy - min_y: dy - min_y + H, dx - min_x: dx - min_x + W] = transformed_unaff_mask
 
-        # Unpack bounding boxes
-        aff_xmin, aff_ymin, aff_xmax, aff_ymax = aff_bbox
-        unaff_xmin, unaff_ymin, unaff_xmax, unaff_ymax = unaff_bbox
+        # Compute boundary profiles
+        top_aff, bottom_aff, left_aff, right_aff = self.compute_boundaries(aff_padded)
+        top_unaff, bottom_unaff, left_unaff, right_unaff = self.compute_boundaries(unaff_padded)
 
-        # Calculate height difference (top position difference)
-        height_diff = abs(aff_ymax - unaff_ymax)
+        # Calculate max height difference (ΔH)
+        max_diff_top = 0
+        max_diff_bottom = 0
+        for x in range(new_width):
+            if top_aff[x] != -1 and top_unaff[x] != -1:
+                diff = abs(top_aff[x] - top_unaff[x])
+                max_diff_top = max(max_diff_top, diff)
+            if bottom_aff[x] != -1 and bottom_unaff[x] != -1:
+                diff = abs(bottom_aff[x] - bottom_unaff[x])
+                max_diff_bottom = max(max_diff_bottom, diff)
+        deltaH = max(max_diff_top, max_diff_bottom)
 
-        # Calculate width difference based on laterality
-        if laterality == 'R':
-            # Right hip: difference between affected rightmost and unaffected leftmost
-            width_diff = abs(aff_xmax - unaff_xmin)
-        else:
-            # Left hip: difference between unaffected rightmost and affected rightmost
-            width_diff = abs(unaff_xmax - aff_xmax)
+        # Calculate max width difference (ΔW)
+        max_diff_left = 0
+        max_diff_right = 0
+        for y in range(new_height):
+            if left_aff[y] != -1 and left_unaff[y] != -1:
+                diff = abs(left_aff[y] - left_unaff[y])
+                max_diff_left = max(max_diff_left, diff)
+            if right_aff[y] != -1 and right_unaff[y] != -1:
+                diff = abs(right_aff[y] - right_unaff[y])
+                max_diff_right = max(max_diff_right, diff)
+        deltaW = max(max_diff_left, max_diff_right)
 
-        # Step 4: Calculate the deformity index
-        deformity_index = (height_diff + width_diff) / unaff_width
-
-        # Store the result
-        self.deformity_index = deformity_index
-
-        # If visualize is True, generate the visualization
-        if visualize:
-            self._visualize_deformity_index(
-                affected_mask, aligned_unaff_mask,
-                laterality, height_diff, width_diff
-            )
-
-        return deformity_index
-
-    def _visualize_deformity_index(self, affected_mask, aligned_unaff_mask, laterality, height_diff, width_diff):
-        """
-        Visualize and save the deformity index calculation.
-
-        Parameters:
-        affected_mask (ndarray): Binary mask of the affected femoral head.
-        aligned_unaff_mask (ndarray): Transformed binary mask of the unaffected femoral head.
-        laterality (str): Laterality of the affected femoral head ('L' or 'R').
-        height_diff (int): Maximum height difference between the aligned masks.
-        width_diff (int): Maximum width difference between the aligned masks.
-        """
-        # Create a figure and axis
-        fig, ax = plt.subplots(figsize=(8, 8))
-
-        # Display the affected and transformed unaffected masks
-        ax.imshow(affected_mask, cmap='Blues', alpha=0.6, label='Affected Mask')
-        ax.imshow(aligned_unaff_mask, cmap='Reds', alpha=0.6, label='Transformed Unaffected Mask')
-
-        # Get the coordinates of the lowest points for alignment
-        affected_y_min = np.min(np.where(affected_mask == 1)[0])
-        affected_x_min = np.min(np.where(affected_mask == 1)[1])
-
-        if laterality == 'R':
-            unaff_y_min = np.min(np.where(aligned_unaff_mask == 1)[0])
-            unaff_x_min = np.max(np.where(aligned_unaff_mask == 1)[1])  # Rightmost point
-        else:  # Left side
-            unaff_y_min = np.min(np.where(aligned_unaff_mask == 1)[0])
-            unaff_x_min = np.min(np.where(aligned_unaff_mask == 1)[1])  # Leftmost point
-
-        # Mark the lowest points of both masks
-        ax.plot(affected_x_min, affected_y_min, 'go', label='Affected Mask Alignment')
-        ax.plot(unaff_x_min, unaff_y_min, 'ro', label='Unaffected Mask Alignment')
-
-        # Add arrows for the height and width differences
-        ax.arrow(affected_y_min, affected_y_min, 0, height_diff, head_width=10, head_length=5, fc='green', ec='green')
-        ax.arrow(affected_x_min, affected_x_min, width_diff, 0, head_width=10, head_length=5, fc='blue', ec='blue')
-
-        # Add text for deformity index
-        ax.text(0.5, 0.05, f'Deformity Index: {self.deformity_index:.2f}', ha='center', va='center', fontsize=14,
-                color='black', transform=ax.transAxes)
-
-        # Set labels and title
-        ax.set_title('Deformity Index Visualization')
-        ax.set_xlabel('X-axis')
-        ax.set_ylabel('Y-axis')
-
-        # Show the legend
-        ax.legend(loc='upper right')
-
-        # Save the visualization
-        debug_path = self.output_folder / f"{self.data['patient_id']}_{self.data['timepoint']}_deformity_index.png"
-        plt.savefig(debug_path, bbox_inches='tight')
-        plt.close(fig)
-
-        return debug_path
+        # Calculate deformity index
+        deformity_index = (deltaH + deltaW) / unaff_width
+        self.di_measurements = {
+            'deformity_index': deformity_index,
+            'deltaH': deltaH,
+            'deltaW': deltaW,
+            'unaff_diameter': unaff_width,
+        }
+        return deformity_index, deltaH, deltaW
 
     def visualize(self):
-        """Visualize rotated masks with pillar divisions and axes."""
+        """Visualize rotated masks with two subplots:
+        Left - EQ & Pillars, Right - Deformity Index"""
         if self.rotated_aff_mask is None:
             raise RuntimeError("Run align_major_axis() first")
 
-        # Create RGB overlay
-        overlay = np.zeros((*self.rotated_aff_mask.shape, 3), dtype=np.uint8)
-        overlay[self.rotated_aff_mask] = [255, 0, 0]  # Red for affected
-        overlay[self.rotated_unaff_mask] = [0, 255, 0]  # Green for unaffected
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
+        fig.suptitle(f"Patient {self.data['patient_id']} - {self.data['timepoint']}", fontsize=16)
+
+        # --- Subplot 1: EQ & Pillar Visualization ---
+        overlay_eq = np.zeros((*self.rotated_aff_mask.shape, 3), dtype=np.uint8)
+
+        # Find contours for mask outlines
+        aff_contours, _ = cv2.findContours(
+            self.rotated_aff_mask.astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        unaff_contours, _ = cv2.findContours(
+            self.rotated_unaff_mask.astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        # Draw contour outlines
+        cv2.drawContours(overlay_eq, aff_contours, -1, (255, 0, 0), 1)  # Red = affected
+        cv2.drawContours(overlay_eq, unaff_contours, -1, (0, 255, 0), 1)  # Green = unaffected
 
         # Get bounding boxes
         def get_bbox(mask):
@@ -447,84 +457,130 @@ class FemoralHeadAnalyzer:
         unaff_bbox = get_bbox(self.rotated_unaff_mask)
 
         # Draw pillar divisions for affected head
-        if aff_bbox[2] - aff_bbox[0] > 0:  # Check if valid bbox
+        if aff_bbox[2] - aff_bbox[0] > 0:
             width = aff_bbox[2] - aff_bbox[0]
             div1 = aff_bbox[0] + width / 3
             div2 = aff_bbox[0] + 2 * width / 3
 
-            # Draw lines
-            cv2.line(overlay, (int(div1), 0), (int(div1), overlay.shape[0]),
+            # Draw pillar division lines
+            cv2.line(overlay_eq, (int(div1), aff_bbox[1]), (int(div1), aff_bbox[3]),
                      (255, 255, 255), 2)
-            cv2.line(overlay, (int(div2), 0), (int(div2), overlay.shape[0]),
+            cv2.line(overlay_eq, (int(div2), aff_bbox[1]), (int(div2), aff_bbox[3]),
                      (255, 255, 255), 2)
 
-        # Draw bounding boxes and major axes
+        # Draw EQ bounding boxes
         for bbox, color in zip([aff_bbox, unaff_bbox], [(0, 0, 255), (0, 255, 255)]):
-            if bbox[2] - bbox[0] > 0:  # Only draw if valid
-                # Draw bounding box
-                cv2.rectangle(overlay, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 1)
+            if bbox[2] - bbox[0] > 0:
+                cv2.rectangle(overlay_eq, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 1)
 
-                # Draw major axis (horizontal)
-                y_center = (bbox[1] + bbox[3]) // 2
-                cv2.line(overlay, (bbox[0], y_center), (bbox[2], y_center), color, 2)
+        ax1.imshow(overlay_eq)
+        ax1.set_title("Epiphyseal Quotient & Pillar Analysis\n"
+                      f"Affected EQ: {self.eq_measurements['aff_eq']:.2f}, "
+                      f"Unaffected EQ: {self.eq_measurements['unaff_eq']:.2f}")
+        ax1.axis('off')
 
-        # Create and save visualization
-        plt.figure(figsize=(10, 8))
-        plt.title(f"Patient {self.data['patient_id']} - {self.data['timepoint']}")
-        plt.imshow(overlay)
-        plt.axis('off')
+        # --- Subplot 2: Deformity Index Visualization ---
+        if not hasattr(self, 'di_measurements'):
+            self.calculate_deformity_index()
 
-        # Save to output folder
+        overlay_di = np.zeros((*self.rotated_aff_mask.shape, 3), dtype=np.uint8)
+        aff_contours, _ = cv2.findContours(
+            self.data['affected_mask'].astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        unaff_contours, _ = cv2.findContours(
+            self.data['transformed_unaff_mask'].astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE)
+
+        # Draw contour outlines
+        cv2.drawContours(overlay_di, aff_contours, -1, (255, 0, 0), 1)
+        cv2.drawContours(overlay_di, unaff_contours, -1, (0, 255, 0), 1)
+
+        # Get DI measurements
+        deltaH = self.di_measurements['deltaH']
+        deltaW = self.di_measurements['deltaW']
+        deformity_index = self.di_measurements['deformity_index']
+        unaff_width = self.di_measurements['unaff_diameter']
+
+
+        ax2.imshow(overlay_di)
+        ax2.set_title("Deformity Index Analysis\n"
+                      f"DI: {deformity_index:.2f}\n"
+                      f"Height Diff: {deltaH:.1f}px, "
+                      f"Width Diff: {deltaW:.1f}px, "
+                      f"Unaffected Diameter: {unaff_width:.1f}px")
+        ax2.axis('off')
+
+        # Save combined visualization
+        plt.tight_layout()
         vis_path = self.output_folder / f"{self.data['patient_id']}_{self.data['timepoint']}_vis.png"
-        plt.savefig(vis_path, bbox_inches='tight')
+        plt.savefig(vis_path, bbox_inches='tight', dpi=300)
         plt.close()
+
         return vis_path
 
-    def save_to_excel(self, filename: str, output_dir: str = None) -> Path:
+    def get_results(self):
         """
-        Save all measurements to Excel file in specified output directory.
-        Appends to existing file or creates new one. Returns path to saved file.
-
-        Args:
-            filename: Excel file name (e.g., "results.xlsx")
-            output_dir: Directory to save file (default: class output_folder)
-
-        Returns:
-            Path to saved Excel file
+        Return all measurements as a dictionary including:
+        - Patient identification
+        - Alignment metrics
+        - Pillar measurements
+        - Epiphyseal quotient measurements
+        - Deformity index and components
         """
-        if not self.pillar_measurements or not self.eq_measurements:
-            raise RuntimeError("Run measure_pillars() and measure_epiphyseal_quotient() first")
-        if self.deformity_index is None:
-            raise RuntimeError("Run calculate_deformity_index() first")
-
-        # Create data row with deformity index
-        row = {
+        # Base information
+        result = {
             'patient_id': self.data['patient_id'],
             'timepoint': self.data['timepoint'],
-            'orientation': self.data['orientation'],
-            'dist': self.data['dist'],
-            **self.pillar_measurements,
-            **self.eq_measurements,
-            'deformity_index': self.deformity_index  # Add deformity index
+            'affected_laterality': self.data['affected_laterality'],
+            'unaffected_laterality': self.data['unaffected_laterality'],
         }
 
-        # Determine output directory
-        target_dir = Path(output_dir) if output_dir else self.output_folder
-        target_dir.mkdir(parents=True, exist_ok=True)
+        # Add pillar measurements
+        result.update({
+            'lateral_ratio': self.pillar_measurements.get('ratio_lateral_max', None),
+            'middle_ratio': self.pillar_measurements.get('ratio_middle_max', None),
+            'medial_ratio': self.pillar_measurements.get('ratio_medial_max', None),
+            'aff_lateral_max': self.pillar_measurements.get('aff_lateral_max', None),
+            'aff_lateral_avg': self.pillar_measurements.get('aff_lateral_avg', None),
+            'aff_middle_max': self.pillar_measurements.get('aff_middle_max', None),
+            'aff_middle_avg': self.pillar_measurements.get('aff_middle_avg', None),
+            'aff_medial_max': self.pillar_measurements.get('aff_medial_max', None),
+            'aff_medial_avg': self.pillar_measurements.get('aff_medial_avg', None),
+            'unaff_lateral_max': self.pillar_measurements.get('unaff_lateral_max', None),
+            'unaff_lateral_avg': self.pillar_measurements.get('unaff_lateral_avg', None),
+            'unaff_middle_max': self.pillar_measurements.get('unaff_middle_max', None),
+            'unaff_middle_avg': self.pillar_measurements.get('unaff_middle_avg', None),
+            'unaff_medial_max': self.pillar_measurements.get('unaff_medial_max', None),
+            'unaff_medial_avg': self.pillar_measurements.get('unaff_medial_avg', None),
 
-        # Create full filepath
-        excel_path = target_dir / filename
+        })
 
-        # Create or append to Excel
-        if excel_path.exists():
-            df = pd.read_excel(excel_path)
-            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        else:
-            df = pd.DataFrame([row])
+        # Add EQ measurements
+        result.update({
+            'eq_ratio': self.eq_measurements.get('eq_ratio', None),
+            'aff_eq': self.eq_measurements.get('aff_eq', None),
+            'aff_width': self.eq_measurements.get('aff_width', None),
+            'aff_height': self.eq_measurements.get('aff_height', None),
+            'unaff_eq': self.eq_measurements.get('unaff_eq', None),
+            'unaff_width': self.eq_measurements.get('unaff_width', None),
+            'unaff_height': self.eq_measurements.get('unaff_height', None)
 
-        df.to_excel(excel_path, index=False)
-        return excel_path
+        })
 
+        # Add DI measurements
+        result.update({
+            'deformity_index': self.di_measurements.get('deformity_index', None),
+            'deltaH': self.di_measurements.get('deltaH', None),
+            'deltaW': self.di_measurements.get('deltaW', None),
+            'unaff_diameter': self.di_measurements.get('unaff_diameter', None),
+        })
+
+        return result
+
+        # ... (rest of the class remains unchanged)
     def process(self):
         """Complete processing pipeline for a single patient/timepoint."""
         # Perform alignment
@@ -533,10 +589,10 @@ class FemoralHeadAnalyzer:
         # Continue with measurements
         self.measure_pillars()
         self.measure_epiphyseal_quotient()
-        self.calculate_deformity_index(visualize=True)  # Calculate and visualize deformity index
+        self.calculate_deformity_index()
 
         # Visualize results
         vis_path = self.visualize()
-        excel_path = self.save_to_excel("results.xlsx")
 
-        return vis_path, excel_path
+        # Return visualization path and results dictionary
+        return vis_path, self.get_results()
