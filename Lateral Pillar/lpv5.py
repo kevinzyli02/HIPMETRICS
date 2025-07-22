@@ -15,7 +15,7 @@ aligned_results = process_all_femoral_heads(
     coco_json_path,
     image_folder,
     output_folder=output_folder,
-    visualize=False,
+    visualize=True,
     max_pairs=5
 )
 
@@ -28,8 +28,10 @@ for i, result in enumerate(aligned_results):  # FIXED: Properly unpack enumerati
     timepoint = result['timepoint']
     print(f"Processing {patient_id}-{timepoint}...")
 
-    analyzer = FemoralHeadAnalyzer(result, output_folder)
+    analyzer = FemoralHeadAnalyzer(result, image_folder, output_folder)
     vis_path, results_dict = analyzer.process()
+    quad_vis_path = analyzer.visualize_quad()  # Generates the 1x4 visualization
+
     all_results.append(results_dict)
 
 # Export to Excel after all processing

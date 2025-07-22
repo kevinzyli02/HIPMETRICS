@@ -1,4 +1,6 @@
 import json
+
+import cv2
 import numpy as np
 from skimage.draw import polygon
 from skimage.measure import regionprops
@@ -13,6 +15,46 @@ import time
 # Use non-interactive backend for server-side execution
 matplotlib.use('Agg')
 
+
+def find_medial_lateral_points(head_mask):
+    '''
+    Finds the two most distant points on the femoral head contour (medial/lateral pillars).
+    Parameters:
+        head_mask (ndarray): Binary mask of femoral head
+    Return value(s):
+        point1, point2 (tuple): (x,y) coordinates of the two points, or (None, None) if not found
+    '''
+    try:
+        # Convert to uint8 format required by OpenCV
+        mask_uint8 = (head_mask * 255).astype(np.uint8)
+
+        # Find contours
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, None
+
+        # Get largest contour
+        contour = max(contours, key=cv2.contourArea)
+        contour = contour.squeeze()
+
+        if len(contour) < 2:
+            return None, None
+
+        # Find points with maximum distance
+        max_dist = -1
+        pt1, pt2 = None, None
+        for i in range(len(contour)):
+            for j in range(i + 1, len(contour)):
+                dist = np.linalg.norm(contour[i] - contour[j])
+                if dist > max_dist:
+                    max_dist = dist
+                    pt1 = tuple(contour[i])
+                    pt2 = tuple(contour[j])
+
+        return pt1, pt2
+    except Exception as e:
+        print(f"Error finding medial/lateral points: {e}")
+        return None, None
 
 def poly_to_mask(poly, width, height):
     '''
@@ -406,14 +448,8 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
 
 def visualize_results(results, pair, image_folder, output_folder):
     '''
-    OVERVIEW: Generates 3-panel visualization showing alignment results.
-              Includes femoral head masks and major axes.
-    PARAMETERS:
-        - results (dict), Required: Alignment results from process_femoral_head_pair
-        - pair (dict), Required: Original femoral head pair metadata
-        - image_folder (str), Required: Path to source images
-        - output_folder (str), Required: Output directory for visualization
-    RETURN VALUE(S): None
+    UPDATED: Visualizes results with medial/lateral points on first two images and
+              simplified final figure without axes or lateral/medial points.
     '''
     # Load images
     aff_img = np.array(Image.open(
@@ -433,42 +469,52 @@ def visualize_results(results, pair, image_folder, output_folder):
     unaff_end1, unaff_end2 = results['unaff_major_axis']
     trans_end1, trans_end2 = results['trans_unaff_major_axis']
 
-    # 1. Affected Head
+    # Find medial/lateral points
+    aff_pt1, aff_pt2 = find_medial_lateral_points(results['affected_mask'])
+    unaff_pt1, unaff_pt2 = find_medial_lateral_points(results['unaffected_original_mask'])
+
+    # 1. Affected Head with medial/lateral points
     ax[0].imshow(aff_img, cmap='gray')
     ax[0].contour(results['affected_mask'], colors='red', linewidths=1)
     ax[0].plot([aff_end1[0], aff_end2[0]], [aff_end1[1], aff_end2[1]],
                'lime', linewidth=2, alpha=0.8)
     ax[0].scatter(results['com_aff'][0], results['com_aff'][1], s=40, c='cyan', marker='x', label='COM')
+
+    # Add medial/lateral points if found
+    if aff_pt1 and aff_pt2:
+        ax[0].scatter([aff_pt1[0], aff_pt2[0]], [aff_pt1[1], aff_pt2[1]],
+                      s=40, c='blue', marker='o', label='Pillar')
+
     ax[0].set_title(f"Affected Head ({results['affected_laterality']})")
     ax[0].legend(loc='upper right')
     ax[0].axis('off')
 
-    # 2. Unaffected Head (original)
+    # 2. Unaffected Head with medial/lateral points
     ax[1].imshow(unaff_img, cmap='gray')
     ax[1].contour(results['unaffected_original_mask'], colors='cyan', linewidths=1)
     ax[1].plot([unaff_end1[0], unaff_end2[0]], [unaff_end1[1], unaff_end2[1]],
                'lime', linewidth=2, alpha=0.8)
     ax[1].scatter(results['com_unaff_original'][0], results['com_unaff_original'][1],
                   s=40, c='cyan', marker='x', label='COM')
+
+    # Add medial/lateral points if found
+    if unaff_pt1 and unaff_pt2:
+        ax[1].scatter([unaff_pt1[0], unaff_pt2[0]], [unaff_pt1[1], unaff_pt2[1]],
+                      s=40, c='blue', marker='o', label='Pillar')
+
     ax[1].set_title(f"Unaffected Head ({results['unaffected_laterality']})")
     ax[1].legend(loc='upper right')
     ax[1].axis('off')
 
-    # 3. Aligned Overlay
+    # 3. Aligned Overlay (simplified - no axes, no lateral/medial points)
     ax[2].imshow(aff_img, cmap='gray')
     ax[2].contour(results['affected_mask'], colors='red', linewidths=1)
     ax[2].contour(results['transformed_unaff_mask'], colors='cyan', linewidths=1, linestyles='dashed')
-    # Draw major axes
-    ax[2].plot([aff_end1[0], aff_end2[0]], [aff_end1[1], aff_end2[1]],
-               'red', linewidth=2, alpha=0.8, label='Affected Head')
-    ax[2].plot([trans_end1[0], trans_end2[0]], [trans_end1[1], trans_end2[1]],
-               'cyan', linewidth=2, alpha=0.8, label='Unaffected Head')
     ax[2].scatter(results['com_aff'][0], results['com_aff'][1], s=40, c='red', marker='x')
     ax[2].scatter(results['com_unaff_trans'][0], results['com_unaff_trans'][1],
                   s=40, facecolor='none', edgecolor='cyan')
     ax[2].set_title('Aligned Overlay')
     ax[2].axis('off')
-    ax[2].legend(loc='upper right')
 
     plt.tight_layout()
 
@@ -476,7 +522,6 @@ def visualize_results(results, pair, image_folder, output_folder):
     viz_path = os.path.join(output_folder, f"Patient_{pair['patient_id']}_{pair['timepoint']}_alignment.png")
     plt.savefig(viz_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
-
 
 def process_all_femoral_heads(coco_json_path, image_folder, output_folder=None,
                               visualize=False, max_pairs=None):

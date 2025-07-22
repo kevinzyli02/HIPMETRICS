@@ -1,14 +1,14 @@
+import os
+from PIL import Image
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 from skimage.transform import rotate
-import pandas as pd
-import os
 from pathlib import Path
 
 
 class FemoralHeadAnalyzer:
-    def __init__(self, result_dict, output_folder):
+    def __init__(self, result_dict, image_folder, output_folder):
         """
         Initialize with a results dictionary for one patient/timepoint.
 
@@ -19,12 +19,13 @@ class FemoralHeadAnalyzer:
         self.data = result_dict
         self.output_folder = Path(output_folder)
         self.output_folder.mkdir(parents=True, exist_ok=True)
+        self.image_folder = image_folder
 
         self.rotated_aff_mask = None
         self.rotated_unaff_mask = None
         self.pillar_measurements = {}
         self.eq_measurements = {}
-        self.deformity_index = None  # Add attribute for deformity index
+        self.di_measurements = {}
 
     def _compute_rotation_angle(self, axis_endpoints):
         """Calculate rotation angle to make major axis horizontal."""
@@ -137,7 +138,7 @@ class FemoralHeadAnalyzer:
 
 
         # Visualize rotation
-        return self._visualize_rotation(angle, aff_center, unaff_center, com_rotated, com_rotated_180, com_orig)
+        #return self._visualize_rotation(angle, aff_center, unaff_center, com_rotated, com_rotated_180, com_orig)
 
     def _visualize_rotation(self, angle, aff_center, unaff_center, com_rotated,com_rotated_180, com_orig):
         """Visualize rotation centers and results"""
@@ -412,6 +413,8 @@ class FemoralHeadAnalyzer:
             'deltaH': deltaH,
             'deltaW': deltaW,
             'unaff_diameter': unaff_width,
+            'aff_padded': aff_padded,
+            'unaff_padded': unaff_padded
         }
         return deformity_index, deltaH, deltaW
 
@@ -580,7 +583,120 @@ class FemoralHeadAnalyzer:
 
         return result
 
-        # ... (rest of the class remains unchanged)
+    def visualize_quad(self):
+        """Create a 1x4 subplot visualization with:
+        1. Original radiograph + affected mask
+        2. Original radiograph + transformed unaffected mask + lateral pillar ratio
+        3. Original radiograph + affected mask + major/minor axes
+        4. Original radiograph + both masks + deformity index
+        """
+        # Ensure we have required measurements
+        if not hasattr(self, 'pillar_measurements'):
+            self.measure_pillars()
+        if not hasattr(self, 'di_measurements'):
+            self.calculate_deformity_index()
+
+        fig, axes = plt.subplots(1, 4, figsize=(24, 6))
+        fig.suptitle(f"Patient {self.data['patient_id']} - {self.data['timepoint']}", fontsize=16)
+
+        # Plot 1: Original + affected mask
+        self._plot_affected_only(axes[0])
+
+        # Plot 2: Original + transformed unaffected mask
+        self._plot_unaffected_overlay(axes[1])
+
+        # Plot 3: Original + axes
+        self._plot_axes(axes[2])
+
+        # Plot 4: Original + both masks
+        self._plot_deformity(axes[3])
+
+        plt.tight_layout()
+        quad_path = self.output_folder / f"{self.data['patient_id']}_{self.data['timepoint']}_quad_vis.png"
+        plt.savefig(quad_path, bbox_inches='tight', dpi=150)
+        plt.close(fig)
+        return quad_path
+
+    # Helper methods for each subplot
+    def _plot_affected_only(self, ax):
+        """Plot 1: Original radiograph with affected mask overlay"""
+        aff_img = np.array(Image.open(
+            os.path.join(self.image_folder, self.data['aff_img_info']['file_name'])
+        ).convert('L'))
+
+        ax.imshow(aff_img, cmap='gray')
+        mask = self.data['affected_mask']
+        overlay = np.zeros((*mask.shape, 4))
+        overlay[mask] = [0, 0, 1, 0.3]  # Blue with transparency
+        ax.imshow(overlay)
+        ax.set_title("Affected Femoral Head")
+        ax.axis('off')
+
+    def _plot_unaffected_overlay(self, ax):
+        """Plot 2: Original radiograph with transformed unaffected mask overlay"""
+        aff_img = np.array(Image.open(
+            os.path.join(self.image_folder, self.data['aff_img_info']['file_name'])
+        ).convert('L'))
+
+        ax.imshow(aff_img, cmap='gray')
+
+        mask = self.data['transformed_unaff_mask']
+        overlay = np.zeros((*mask.shape, 4))
+        overlay[mask] = [0, 1, 0, 0.3]  # Green with transparency
+        ax.imshow(overlay)
+
+        # Add lateral pillar ratio to title
+        ratio = self.pillar_measurements.get('ratio_lateral_max', None)
+        ratio_txt = f"{ratio:.2f}" if ratio is not None else "N/A"
+        ax.set_title(f"Unaffected Mask Overlay\nLateral Pillar Ratio: {ratio_txt}")
+        ax.axis('off')
+
+    def _plot_axes(self, ax):
+        """Plot 3: Original radiograph with major/minor axes"""
+        aff_img = np.array(Image.open(
+            os.path.join(self.image_folder, self.data['aff_img_info']['file_name'])
+        ).convert('L'))
+
+        ax.imshow(aff_img, cmap='gray')
+        # Overlay affected mask
+        mask = self.data['affected_mask']
+        overlay = np.zeros((*mask.shape, 4))
+        overlay[mask] = [0, 0, 1, 0.3]
+        ax.imshow(overlay)
+
+        # Plot major axis (red)
+        (mx1, my1), (mx2, my2) = self.data['aff_major_axis']
+        ax.plot([mx1, mx2], [my1, my2], 'r-', linewidth=2, label='Major Axis')
+
+        # Plot minor axis (cyan)
+        (mix1, miy1), (mix2, miy2) = self.data['aff_minor_axis']
+        ax.plot([mix1, mix2], [miy1, miy2], 'c-', linewidth=2, label='Minor Axis')
+
+        ax.set_title("Major & Minor Axes")
+        ax.legend(loc='best')
+        ax.axis('off')
+
+    def _plot_deformity(self, ax):
+        """Plot 4: Original + both masks with deformity index"""
+        ax.imshow(self.data['original_image'], cmap='gray')
+
+        # Overlay both masks
+        aff_mask = self.data['affected_mask']
+        unaff_mask = self.data['transformed_unaff_mask']
+
+        # Create combined RGBA overlay
+        overlay = np.zeros((*aff_mask.shape, 4))
+        overlay[aff_mask] = [0, 0, 1, 0.3]  # Blue - affected
+        overlay[unaff_mask] = [0, 1, 0, 0.3]  # Green - unaffected
+
+        ax.imshow(overlay)
+
+        # Add deformity index to title
+        di = self.di_measurements.get('deformity_index', None)
+        di_txt = f"{di:.2f}" if di is not None else "N/A"
+        ax.set_title(f"Deformity Visualization\nDeformity Index: {di_txt}")
+        ax.axis('off')
+
     def process(self):
         """Complete processing pipeline for a single patient/timepoint."""
         # Perform alignment
