@@ -2,7 +2,7 @@ import numpy as np
 from skimage.transform import rotate
 from pathlib import Path
 from measurement import PillarMeasurement, EQMeasurement, DIMeasurement
-from visualization import FinalMeasurementVisualizer
+from visualization import FinalMeasurementVisualizer, MeasurementVisualizer
 
 
 class FemoralHeadAnalyzer:
@@ -172,8 +172,13 @@ class FemoralHeadAnalyzer:
         self.eq_measurement.calculate()
         self.di_measurement.calculate()
 
-        # Generate visualization
+        # Generate measurement visualizations
+        meas_visualizer = MeasurementVisualizer(self, self.output_folder)
+        meas_visualizer.visualize_di()
+        meas_visualizer.visualize_lateral_pillar()
+        meas_visualizer.visualize_eq()
+
+        # Generate original visualization
         vis_path = self.visualizer.visualize_quad()
 
-        # Return visualization path and results
         return vis_path, self.get_results()
