@@ -15,15 +15,15 @@ aligned_results = process_all_femoral_heads(
     coco_json_path,
     image_folder,
     output_folder=output_folder,
-    visualize=True,
-    max_pairs=5
+    visualize=False,
+    max_pairs=10
 )
 
 # Initialize results collector
 all_results = []
 
 # Process each result
-for i, result in enumerate(aligned_results):  # FIXED: Properly unpack enumeration
+for i, result in enumerate(aligned_results):
     patient_id = result['patient_id']
     timepoint = result['timepoint']
     print(f"Processing {patient_id}-{timepoint}...")

@@ -2,7 +2,7 @@ import numpy as np
 from skimage.transform import rotate
 from pathlib import Path
 from measurement import PillarMeasurement, EQMeasurement, DIMeasurement
-from visualization import FemoralHeadVisualizer
+from visualization import FinalMeasurementVisualizer
 
 
 class FemoralHeadAnalyzer:
@@ -16,7 +16,7 @@ class FemoralHeadAnalyzer:
         self.pillar_measurement = PillarMeasurement(self)
         self.eq_measurement = EQMeasurement(self)
         self.di_measurement = DIMeasurement(self)
-        self.visualizer = FemoralHeadVisualizer(self, output_folder)
+        self.visualizer = FinalMeasurementVisualizer(self, images_folder, output_folder)
 
         # Initialize results storage
         self.pillar_measurements = {}
@@ -131,9 +131,11 @@ class FemoralHeadAnalyzer:
             'timepoint': self.data['timepoint'],
             'affected_laterality': self.data['affected_laterality'],
             'unaffected_laterality': self.data['unaffected_laterality'],
-            'lateral_ratio': self.pillar_measurements.get('ratio_lateral_max', None),
-            'middle_ratio': self.pillar_measurements.get('ratio_middle_max', None),
-            'medial_ratio': self.pillar_measurements.get('ratio_medial_max', None),
+            'herring_class': self.pillar_measurements['herring_class'],
+            'lateral_ratio': self.pillar_measurements.get('ratio_lateral_avg', None),
+            'middle_ratio': self.pillar_measurements.get('ratio_middle_avg', None),
+            'medial_ratio': self.pillar_measurements.get('ratio_medial_avg', None),
+            'lateral_width_ratio': self.pillar_measurements.get('ratio_lateral_width_max', None),
             'aff_lateral_max': self.pillar_measurements.get('aff_lateral_max', None),
             'aff_lateral_avg': self.pillar_measurements.get('aff_lateral_avg', None),
             'aff_middle_max': self.pillar_measurements.get('aff_middle_max', None),

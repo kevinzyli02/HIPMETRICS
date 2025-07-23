@@ -1,6 +1,4 @@
 import json
-
-import cv2
 import numpy as np
 from skimage.draw import polygon
 from skimage.measure import regionprops
@@ -11,6 +9,7 @@ from PIL import Image
 import matplotlib
 from matplotlib.lines import Line2D
 import time
+import cv2
 
 # Use non-interactive backend for server-side execution
 matplotlib.use('Agg')
@@ -22,7 +21,8 @@ def find_medial_lateral_points(head_mask):
     Parameters:
         head_mask (ndarray): Binary mask of femoral head
     Return value(s):
-        point1, point2 (tuple): (x,y) coordinates of the two points, or (None, None) if not found
+        point1, point2 (tuple): (x,y) coordinates of the two points
+        or (None, None) if not found
     '''
     try:
         # Convert to uint8 format required by OpenCV
@@ -56,15 +56,67 @@ def find_medial_lateral_points(head_mask):
         print(f"Error finding medial/lateral points: {e}")
         return None, None
 
+
+def get_major_minor_axis(mask):
+    '''
+    FIXED: Calculates major/minor axes using medial/lateral pillars as major axis endpoints.
+            Computes minor_length and returns all required values.
+    '''
+    points_rc = np.argwhere(mask)
+    if len(points_rc) < 2:
+        return None, None, None, None, None, None
+
+    points_xy = points_rc[:, [1, 0]]  # Convert to (x, y)
+
+    try:
+        # Use approximate convex hull for speed
+        if len(points_xy) > 100:
+            hull = ConvexHull(points_xy, qhull_options="QJ")
+        else:
+            hull = ConvexHull(points_xy)
+    except:
+        return None, None, None, None, None, None
+
+    hull_points = points_xy[hull.vertices]
+
+    if len(hull_points) < 2:
+        return None, None, None, None, None, None
+
+    # Find medial and lateral pillars (most distant points)
+    dist_mat = distance_matrix(hull_points, hull_points)
+    i, j = np.unravel_index(np.argmax(dist_mat), dist_mat.shape)
+    p1_xy = hull_points[i]
+    p2_xy = hull_points[j]
+
+    # Major axis is between medial and lateral pillars
+    major_vector = p2_xy - p1_xy
+    center_xy = (p1_xy + p2_xy) / 2.0
+    major_length = np.linalg.norm(major_vector)
+
+    if major_length < 1e-5:
+        return None, None, None, None, None, None
+
+    u_major = major_vector / major_length
+    u_minor = np.array([-u_major[1], u_major[0]])
+
+    # Project hull points to minor axis
+    vectors = hull_points - center_xy
+    proj = np.dot(vectors, u_minor)
+
+    # Calculate minor axis length
+    minor_length = np.max(proj) - np.min(proj)
+
+    # Find minor axis endpoints
+    min_idx = np.argmin(proj)
+    max_idx = np.argmax(proj)
+    minor_end1 = hull_points[min_idx]
+    minor_end2 = hull_points[max_idx]
+
+    return center_xy, u_major, minor_length, major_length, (p1_xy, p2_xy), (minor_end1, minor_end2)
+
 def poly_to_mask(poly, width, height):
     '''
-    OVERVIEW: Converts polygon coordinates to a binary mask. Handles empty polygons and coordinate clipping.
-    PARAMETERS:
-        - poly (list), Required: Polygon coordinates [x1,y1,x2,y2,...]
-        - width (int), Required: Width of output mask
-        - height (int), Required: Height of output mask
-    RETURN VALUE(S):
-        - mask (ndarray): Binary mask with polygon filled
+    Converts polygon coordinates to a binary mask.
     '''
     if len(poly) == 0:
         return np.zeros((height, width), dtype=bool)
@@ -78,79 +130,10 @@ def poly_to_mask(poly, width, height):
     return mask
 
 
-def get_major_minor_axis(mask):
-    '''
-    OVERVIEW: Calculates major/minor axes using convex hull approximation. Handles small masks.
-    PARAMETERS:
-        - mask (ndarray), Required: Binary mask of femoral head
-    RETURN VALUE(S):
-        - center_xy (ndarray): Center point of major axis
-        - u_major (ndarray): Unit vector of major axis
-        - minor_length (float): Length of minor axis
-        - major_length (float): Length of major axis
-    '''
-    points_rc = np.argwhere(mask)
-    if len(points_rc) < 2:
-        return None, None, None, None
-
-    points_xy = points_rc[:, [1, 0]]  # Convert to (x, y)
-
-    try:
-        # Use approximate convex hull for speed
-        if len(points_xy) > 100:
-            hull = ConvexHull(points_xy, qhull_options="QJ")
-        else:
-            hull = ConvexHull(points_xy)
-    except:
-        return None, None, None, None
-
-    hull_points = points_xy[hull.vertices]
-
-    if len(hull_points) < 2:
-        return None, None, None, None
-
-    # Use distance matrix only on convex hull points
-    dist_mat = distance_matrix(hull_points, hull_points)
-    i, j = np.unravel_index(np.argmax(dist_mat), dist_mat.shape)
-    p1_xy = hull_points[i]
-    p2_xy = hull_points[j]
-
-    major_vector = p2_xy - p1_xy
-    center_xy = (p1_xy + p2_xy) / 2.0
-    major_length = np.linalg.norm(major_vector)
-
-    if major_length < 1e-5:
-        return center_xy, major_vector, 0, 0
-
-    u_major = major_vector / major_length
-    u_minor = np.array([-u_major[1], u_major[0]])
-
-    # Project only hull points to save time
-    vectors = hull_points - center_xy
-    proj = np.dot(vectors, u_minor)
-    minor_length = np.max(proj) - np.min(proj)
-
-    # Calculate major axis endpoints
-    axis_length = 100  # pixels
-    end1 = center_xy + u_major * axis_length
-    end2 = center_xy - u_major * axis_length
-
-    # Ensure end1 has higher y-value than end2
-    if end1[1] < end2[1]:
-        end1, end2 = end2, end1  # Swap endpoints if needed
-
-    return center_xy, u_major, minor_length, major_length
-
-
 def get_center_of_mass(mask):
     '''
-    OVERVIEW: Computes center of mass using region properties. Handles empty masks.
-    PARAMETERS:
-        - mask (ndarray), Required: Binary mask of femoral head
-    RETURN VALUE(S):
-        - com (ndarray): [x,y] center of mass coordinates
+    Computes center of mass using region properties.
     '''
-    # Use regionprops only if necessary
     if np.sum(mask) == 0:
         return None
 
@@ -164,13 +147,7 @@ def get_center_of_mass(mask):
 
 def find_femoral_head_pairs(coco_json_path, max_pairs=None):
     '''
-    OVERVIEW: Identifies matching left/right femoral head pairs from COCO data.
-              Limits results based on max_pairs parameter.
-    PARAMETERS:
-        - coco_json_path (str), Required: Path to COCO annotations file
-        - max_pairs (int), Optional (Default value: None): Maximum pairs to return
-    RETURN VALUE(S):
-        - pairs (list): Found femoral head pairs with metadata
+    Identifies matching left/right femoral head pairs from COCO data.
     '''
     with open(coco_json_path) as f:
         coco = json.load(f)
@@ -259,33 +236,7 @@ def find_femoral_head_pairs(coco_json_path, max_pairs=None):
 
 def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, output_folder=None):
     '''
-    OVERVIEW: Processes femoral head pair by aligning unaffected head to affected head.
-              Optionally generates visualizations.
-    PARAMETERS:
-        - pair (dict), Required: Femoral head pair metadata
-        - coco_data (dict), Required: COCO dataset annotations
-        - image_folder (str), Required: Path to image directory
-        - visualize (bool), Optional (Default value: False): Generate output visualizations
-        - output_folder (str), Optional (Default value: None): Output directory for results
-    RETURN VALUE(S):
-        - results (dict): Alignment results with masks and metrics
-        {
-            'patient_id': str,           # Patient identifier
-            'timepoint': str,            # Timepoint identifier
-            'affected_mask': ndarray,    # Binary mask of affected femoral head (H x W)
-            'transformed_unaff_mask': ndarray,  # Binary mask of aligned unaffected head (H x W)
-            'dist': float,               # COM distance between heads
-            'orientation': str,          # Rotation orientation used ("0°" or "180°")
-            'com_aff': ndarray,          # Center of mass of affected head [x, y]
-            'com_unaff_trans': ndarray,  # Transformed COM of unaffected head [x, y]
-            'aff_img_info': dict,        # COCO image info for affected image
-            'unaff_img_info': dict,      # COCO image info for unaffected image
-            'affected_laterality': str,  # Laterality of affected head ("L" or "R")
-            'unaffected_laterality': str,# Laterality of unaffected head ("L" or "R")
-            'aff_major_axis': tuple,     # Endpoints of affected major axis ((x1,y1), (x2,y2))
-            'unaff_major_axis': tuple,   # Endpoints of unaffected major axis ((x1,y1), (x2,y2))
-            'trans_unaff_major_axis': tuple  # Endpoints of transformed unaffected axis ((x1,y1), (x2,y2))
-        }
+    Processes femoral head pair by aligning unaffected head to affected head.
     '''
     # Create head dictionaries
     heads = []
@@ -310,22 +261,13 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
             print(f"Failed to calculate axis for {img_info['file_name']}")
             return None
 
-        center_xy, u_major, minor_length, major_length = axis_data
+        center_xy, u_major, minor_length, major_length, major_ends, minor_ends = axis_data
 
         # Get center of mass
         com = get_center_of_mass(mask)
         if com is None:
             print(f"Failed to get COM for {img_info['file_name']}")
             return None
-
-        # Calculate major axis endpoints
-        axis_length = 100  # pixels
-        end1 = center_xy + u_major * axis_length
-        end2 = center_xy - u_major * axis_length
-
-        # Ensure end1 has higher y-value than end2
-        if end1[1] < end2[1]:
-            end1, end2 = end2, end1  # Swap endpoints if needed
 
         # Store only necessary data
         heads.append({
@@ -340,7 +282,8 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
             'original_center_xy': center_xy.copy(),
             'original_u_major': u_major.copy(),
             'original_com': com.copy(),
-            'major_axis_ends': (end1, end2)
+            'major_axis_ends': major_ends,
+            'minor_axis_ends': minor_ends
         })
 
     # Identify affected and unaffected
@@ -356,15 +299,14 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
     flipped_center = np.array([w - unaffected['original_center_xy'][0], unaffected['original_center_xy'][1]])
     flipped_com = np.array([w - unaffected['original_com'][0], unaffected['original_com'][1]])
     flipped_u_major = np.array([-unaffected['original_u_major'][0], unaffected['original_u_major'][1]])
-
-    # Calculate flipped major axis endpoints
-    axis_length = 100
-    flipped_end1 = flipped_center + flipped_u_major * axis_length
-    flipped_end2 = flipped_center - flipped_u_major * axis_length
-
-    # Ensure flipped_end1 has higher y-value than flipped_end2
-    if flipped_end1[1] < flipped_end2[1]:
-        flipped_end1, flipped_end2 = flipped_end2, flipped_end1
+    flipped_major_ends = (
+        np.array([w - unaffected['major_axis_ends'][0][0], unaffected['major_axis_ends'][0][1]]),
+        np.array([w - unaffected['major_axis_ends'][1][0], unaffected['major_axis_ends'][1][1]])
+    )
+    flipped_minor_ends = (
+        np.array([w - unaffected['minor_axis_ends'][0][0], unaffected['minor_axis_ends'][0][1]]),
+        np.array([w - unaffected['minor_axis_ends'][1][0], unaffected['minor_axis_ends'][1][1]])
+    )
 
     # Calculate rotation
     angle_aff = np.arctan2(affected['u_major'][1], affected['u_major'][0])
@@ -410,12 +352,15 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
     ]
 
     # Transform major axis endpoints
-    trans_end1 = R @ (flipped_end1 - flipped_center) + affected['center_xy']
-    trans_end2 = R @ (flipped_end2 - flipped_center) + affected['center_xy']
+    trans_major_end1 = R @ (flipped_major_ends[0] - flipped_center) + affected['center_xy']
+    trans_major_end2 = R @ (flipped_major_ends[1] - flipped_center) + affected['center_xy']
 
-    # Ensure trans_end1 has higher y-value than trans_end2
-    if trans_end1[1] < trans_end2[1]:
-        trans_end1, trans_end2 = trans_end2, trans_end1
+    # Transform minor axis endpoints
+    trans_minor_end1 = R @ (flipped_minor_ends[0] - flipped_center) + affected['center_xy']
+    trans_minor_end2 = R @ (flipped_minor_ends[1] - flipped_center) + affected['center_xy']
+
+    # Calculate minor axis for transformed unaffected mask
+    trans_unaff_minor_ends = (trans_minor_end1, trans_minor_end2)
 
     # Prepare results
     results = {
@@ -433,10 +378,12 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
         'unaff_img_info': unaffected['image_info'],
         'affected_laterality': affected['laterality'],
         'unaffected_laterality': unaffected['laterality'],
-        # Major axis endpoints
+        # Axis endpoints
         'aff_major_axis': affected['major_axis_ends'],
         'unaff_major_axis': unaffected['major_axis_ends'],
-        'trans_unaff_major_axis': (trans_end1, trans_end2)
+        'trans_unaff_major_axis': (trans_major_end1, trans_major_end2),
+        'aff_minor_axis': affected['minor_axis_ends'],
+        'trans_unaff_minor_axis': trans_unaff_minor_ends
     }
 
     # Visualization
@@ -445,11 +392,10 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
 
     return results
 
-
 def visualize_results(results, pair, image_folder, output_folder):
     '''
-    UPDATED: Visualizes results with medial/lateral points on first two images and
-              simplified final figure without axes or lateral/medial points.
+    UPDATED: Visualizes results with medial/lateral points as major axis endpoints
+             and minor axis stored in results dictionary.
     '''
     # Load images
     aff_img = np.array(Image.open(
@@ -464,56 +410,56 @@ def visualize_results(results, pair, image_folder, output_folder):
     fig, ax = plt.subplots(1, 3, figsize=(18, 6))
     fig.suptitle(f"Patient {pair['patient_id']} - {pair['timepoint']} | Dist: {results['dist']:.1f}px", fontsize=16)
 
-    # Extract major axis endpoints
-    aff_end1, aff_end2 = results['aff_major_axis']
-    unaff_end1, unaff_end2 = results['unaff_major_axis']
-    trans_end1, trans_end2 = results['trans_unaff_major_axis']
+    # Extract axis endpoints
+    aff_major_end1, aff_major_end2 = results['aff_major_axis']
+    unaff_major_end1, unaff_major_end2 = results['unaff_major_axis']
+    trans_major_end1, trans_major_end2 = results['trans_unaff_major_axis']
+    aff_minor_end1, aff_minor_end2 = results['aff_minor_axis']
+    unaff_minor_end1, unaff_minor_end2 = results['trans_unaff_minor_axis']
 
-    # Find medial/lateral points
-    aff_pt1, aff_pt2 = find_medial_lateral_points(results['affected_mask'])
-    unaff_pt1, unaff_pt2 = find_medial_lateral_points(results['unaffected_original_mask'])
-
-    # 1. Affected Head with medial/lateral points
+    # 1. Affected Head
     ax[0].imshow(aff_img, cmap='gray')
     ax[0].contour(results['affected_mask'], colors='red', linewidths=1)
-    ax[0].plot([aff_end1[0], aff_end2[0]], [aff_end1[1], aff_end2[1]],
-               'lime', linewidth=2, alpha=0.8)
-    ax[0].scatter(results['com_aff'][0], results['com_aff'][1], s=40, c='cyan', marker='x', label='COM')
-
-    # Add medial/lateral points if found
-    if aff_pt1 and aff_pt2:
-        ax[0].scatter([aff_pt1[0], aff_pt2[0]], [aff_pt1[1], aff_pt2[1]],
-                      s=40, c='blue', marker='o', label='Pillar')
-
+    # Draw major axis (medial-lateral pillars)
+    ax[0].plot([aff_major_end1[0], aff_major_end2[0]], [aff_major_end1[1], aff_major_end2[1]],
+               'white', linewidth=2, alpha=0.8, label='Major Axis')
+    # Plot lateral-most points as blue dots
+    ax[0].scatter(
+        [aff_major_end1[0], aff_major_end2[0]],
+        [aff_major_end1[1], aff_major_end2[1]],
+        s=20, c='blue', marker='o', label='Lateral-Most Points'
+    )
+    ax[0].scatter(results['com_aff'][0], results['com_aff'][1], s=40, c='white', marker='x', label='COM')
     ax[0].set_title(f"Affected Head ({results['affected_laterality']})")
     ax[0].legend(loc='upper right')
     ax[0].axis('off')
 
-    # 2. Unaffected Head with medial/lateral points
+    # 2. Unaffected Head
     ax[1].imshow(unaff_img, cmap='gray')
-    ax[1].contour(results['unaffected_original_mask'], colors='cyan', linewidths=1)
-    ax[1].plot([unaff_end1[0], unaff_end2[0]], [unaff_end1[1], unaff_end2[1]],
-               'lime', linewidth=2, alpha=0.8)
+    ax[1].contour(results['unaffected_original_mask'], colors='lime', linewidths=1)
+    # Draw major axis
+    ax[1].plot([unaff_major_end1[0], unaff_major_end2[0]], [unaff_major_end1[1], unaff_major_end2[1]],
+               'white', linewidth=2, alpha=0.8, label='Major Axis')
+    # Plot lateral-most points as blue dots
+    ax[1].scatter(
+        [unaff_major_end1[0], unaff_major_end2[0]],
+        [unaff_major_end1[1], unaff_major_end2[1]],
+        s=20, c='blue', marker='o', label='Lateral-Most Points'
+    )
     ax[1].scatter(results['com_unaff_original'][0], results['com_unaff_original'][1],
-                  s=40, c='cyan', marker='x', label='COM')
-
-    # Add medial/lateral points if found
-    if unaff_pt1 and unaff_pt2:
-        ax[1].scatter([unaff_pt1[0], unaff_pt2[0]], [unaff_pt1[1], unaff_pt2[1]],
-                      s=40, c='blue', marker='o', label='Pillar')
-
+                  s=40, c='white', marker='x', label='COM')
     ax[1].set_title(f"Unaffected Head ({results['unaffected_laterality']})")
     ax[1].legend(loc='upper right')
     ax[1].axis('off')
 
-    # 3. Aligned Overlay (simplified - no axes, no lateral/medial points)
+    # 3. Aligned Overlay (simplified)
     ax[2].imshow(aff_img, cmap='gray')
-    ax[2].contour(results['affected_mask'], colors='red', linewidths=1)
-    ax[2].contour(results['transformed_unaff_mask'], colors='cyan', linewidths=1, linestyles='dashed')
-    ax[2].scatter(results['com_aff'][0], results['com_aff'][1], s=40, c='red', marker='x')
-    ax[2].scatter(results['com_unaff_trans'][0], results['com_unaff_trans'][1],
-                  s=40, facecolor='none', edgecolor='cyan')
+    ax[2].contour(results['affected_mask'], colors='red', linewidths=1, label='affected head')
+    ax[2].contour(results['transformed_unaff_mask'], colors='lime', linewidths=1, linestyles='dashed', label='flipped unaffected head')
+    ax[2].scatter(results['com_aff'][0], results['com_aff'][1], s=40, c='red', marker='.')
+    ax[2].scatter(results['com_unaff_trans'][0], results['com_unaff_trans'][1], s=40, c ='lime', marker='.')
     ax[2].set_title('Aligned Overlay')
+
     ax[2].axis('off')
 
     plt.tight_layout()
@@ -526,33 +472,7 @@ def visualize_results(results, pair, image_folder, output_folder):
 def process_all_femoral_heads(coco_json_path, image_folder, output_folder=None,
                               visualize=False, max_pairs=None):
     '''
-    OVERVIEW: Processes all femoral head pairs in a COCO dataset.
-              Controls visualization and limits processing count.
-    PARAMETERS:
-        - coco_json_path (str), Required: Path to COCO annotations
-        - image_folder (str), Required: Directory containing source images
-        - output_folder (str), Optional (Default value: None): Output directory for results
-        - visualize (bool), Optional (Default value: False): Generate visualizations
-        - max_pairs (int), Optional (Default value: None): Maximum pairs to process
-    RETURN VALUE(S):
-        - results (list): Processed femoral head alignment results
-        {
-            'patient_id': str,           # Patient identifier
-            'timepoint': str,            # Timepoint identifier
-            'affected_mask': ndarray,    # Binary mask of affected femoral head (H x W)
-            'transformed_unaff_mask': ndarray,  # Binary mask of aligned unaffected head (H x W)
-            'dist': float,               # COM distance between heads
-            'orientation': str,          # Rotation orientation used ("0°" or "180°")
-            'com_aff': ndarray,          # Center of mass of affected head [x, y]
-            'com_unaff_trans': ndarray,  # Transformed COM of unaffected head [x, y]
-            'aff_img_info': dict,        # COCO image info for affected image
-            'unaff_img_info': dict,      # COCO image info for unaffected image
-            'affected_laterality': str,  # Laterality of affected head ("L" or "R")
-            'unaffected_laterality': str,# Laterality of unaffected head ("L" or "R")
-            'aff_major_axis': tuple,     # Endpoints of affected major axis ((x1,y1), (x2,y2))
-            'unaff_major_axis': tuple,   # Endpoints of unaffected major axis ((x1,y1), (x2,y2))
-            'trans_unaff_major_axis': tuple  # Endpoints of transformed unaffected axis ((x1,y1), (x2,y2))
-        }
+    Processes all femoral head pairs in a COCO dataset.
     '''
     # Find pairs with limit
     pairs = find_femoral_head_pairs(coco_json_path, max_pairs=max_pairs)
