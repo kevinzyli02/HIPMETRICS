@@ -4,10 +4,10 @@ import pandas as pd
 from pseudoaxisalignment import process_all_femoral_heads
 from analyzer import FemoralHeadAnalyzer
 
-# File Paths (unchanged)
-coco_json_path = r'C:\Users\SR207348\Downloads\labels_ipsg102_2025-06-30-08-40-52.json'
-image_folder = r'C:\Users\SR207348\Downloads\ipsg102\ipsg102'
-output_folder = r"C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\ipsg102_DI"
+# File Paths
+coco_json_path = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage\output.json'
+image_folder = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage'
+output_folder = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\Fragmentation Stage Measurements'
 os.makedirs(output_folder, exist_ok=True)
 
 # Align Hips
@@ -16,9 +16,10 @@ aligned_results = process_all_femoral_heads(
     image_folder,
     output_folder=output_folder,
     visualize=False,
-    max_pairs=10
-)
+    max_pairs=100
 
+)
+print(length(aligned_results))
 # Initialize results collector
 all_results = []
 

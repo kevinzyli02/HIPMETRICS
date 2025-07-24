@@ -81,7 +81,7 @@ class MeasurementVisualizer:
 
         # Draw pillar divisions
         self._draw_pillar_divisions(ax, aff_mask, self.data['affected_laterality'], 'red')
-        self._draw_pillar_divisions(ax, unaff_mask, self.data['unaffected_laterality'], 'lime')
+        self._draw_pillar_divisions(ax, unaff_mask, self.data['affected_laterality'], 'lime')
 
         # Calculate and plot COM
         aff_com = self.analyzer.rotated_aff_com
@@ -250,7 +250,7 @@ class FinalMeasurementVisualizer:
     def __init__(self, analyzer, img_folder, output_folder):
         self.analyzer = analyzer
         self.data = analyzer.data
-        self.output_folder = Path(output_folder)
+        self.output_folder = Path(output_folder) / "final viz"
         self.output_folder.mkdir(parents=True, exist_ok=True)
         self.img_folder = Path(img_folder)
         self.original_image = self._load_original_image()
@@ -313,9 +313,15 @@ class FinalMeasurementVisualizer:
         ax.axis('off')
 
     def _plot_deformity(self, ax):
+        di_data = self.analyzer.di_measurements
+        aff_mask = di_data.get('aff_padded', None)
+        unaff_mask = di_data.get('unaff_padded', None)
+
+
+        # Draw masks
+        self._draw_mask_outline(ax, aff_mask, 'red')
+        self._draw_mask_outline(ax, unaff_mask, 'lime')
         ax.imshow(self.original_image, cmap='gray')
-        self._draw_mask_outline(ax, self.data['affected_mask'], color='red')
-        self._draw_mask_outline(ax, self.data['transformed_unaff_mask'], color='lime')
 
         di = self.analyzer.di_measurements.get('deformity_index', None)
         di_txt = f"{di:.2f}" if di is not None else "N/A"
@@ -340,7 +346,10 @@ class FinalMeasurementVisualizer:
         self._plot_deformity(axes[1, 2])
 
         plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust for suptitle
+
+        # Save to final viz folder
         quad_path = self.output_folder / f"{self.data['patient_id']}_{self.data['timepoint']}_quad_vis.png"
-        plt.savefig(quad_path, bbox_inches='tight', dpi=150)
+        plt.savefig(quad_path, bbox_inches='tight', dpi=300)  # Increased DPI
         plt.close(fig)
+
         return quad_path

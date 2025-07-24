@@ -134,10 +134,10 @@ class FemoralHeadAnalyzer:
             self.rotated_aff_com = com_rotated_aff
             self.unaff_flipped = False
 
-
-        print('unaffected side side')
-        print(f"com before and after rotation: {com_rotated_unaff[1]} {com_rotated_unaff_180[1]}")
-        print(f"did we flip: {self.unaff_flipped}")
+        # Troubleshooting info
+        # print('unaffected side side')
+        # print(f"com before and after rotation: {com_rotated_unaff[1]} {com_rotated_unaff_180[1]}")
+        # print(f"did we flip: {self.unaff_flipped}")
 
 
     def get_results(self):

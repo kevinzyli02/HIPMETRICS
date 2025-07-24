@@ -465,6 +465,7 @@ def visualize_results(results, pair, image_folder, output_folder):
     plt.tight_layout()
 
     # Save visualization
+    output_folder = Path(output_folder) / "final viz"
     viz_path = os.path.join(output_folder, f"Patient_{pair['patient_id']}_{pair['timepoint']}_alignment.png")
     plt.savefig(viz_path, bbox_inches='tight', dpi=150)
     plt.close(fig)

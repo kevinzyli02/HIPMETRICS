@@ -113,16 +113,16 @@ class PillarMeasurement(BaseMeasurement):
         Returns:
             str: Herring classification (A, B, C, or B/C border)
         """
-        # Extract lateral pillar max heights (index 0 in both lists)
-        aff_lat_max = aff_heights[0]
-        unaff_lat_max = unaff_heights[0]
+        # Extract lateral pillar max average (index 0 in both lists)
+        aff_lat_avg = aff_heights[1]
+        unaff_lat_avg = unaff_heights[1]
 
         # Handle edge cases
-        if unaff_lat_max == 0:
+        if unaff_lat_avg == 0:
             return "Undefined (reference height=0)"
 
         # Calculate height ratio
-        height_ratio = aff_lat_max / unaff_lat_max
+        height_ratio = aff_lat_avg / unaff_lat_avg
 
         # Determine classification
         if height_ratio >= 0.95:
@@ -140,7 +140,7 @@ class PillarMeasurement(BaseMeasurement):
                 self.analyzer.rotated_aff_mask, self.data['affected_laterality']
             )
             unaff_heights = self._calculate_pillar_heights(
-                self.analyzer.rotated_unaff_mask, self.data['unaffected_laterality'] #since it is already flipped l/r we want to use the same laterality as the affected side
+                self.analyzer.rotated_unaff_mask, self.data['affected_laterality'] #since it is already flipped l/r we want to use the same laterality as the affected side
             )
 
             # Calculate ratios (avoid division by zero)
@@ -175,6 +175,7 @@ class PillarMeasurement(BaseMeasurement):
             print(f"Error in PillarMeasurement.calculate: {str(e)}")
             import traceback
             traceback.print_exc()
+
 
 class EQMeasurement(BaseMeasurement):
     def _calculate_epiphyseal_quotient(self, mask):
