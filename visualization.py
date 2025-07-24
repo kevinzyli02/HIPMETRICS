@@ -60,8 +60,9 @@ class MeasurementVisualizer:
         plt.close(fig)
         return save_path
 
+    # Update the visualize_lateral_pillar method
     def visualize_lateral_pillar(self):
-        """Visualize lateral pillars with thirds division"""
+        """Visualize lateral pillars with thirds division and COM markers"""
         aff_mask = self.analyzer.rotated_aff_mask
         unaff_mask = self.analyzer.rotated_unaff_mask
         pillar_data = self.analyzer.pillar_measurements
@@ -82,6 +83,20 @@ class MeasurementVisualizer:
         self._draw_pillar_divisions(ax, aff_mask, self.data['affected_laterality'], 'red')
         self._draw_pillar_divisions(ax, unaff_mask, self.data['unaffected_laterality'], 'lime')
 
+        # Calculate and plot COM
+        aff_com = self._compute_com(aff_mask)
+        unaff_com = self._compute_com(unaff_mask)
+
+        # Plot COM markers
+        ax.scatter(aff_com[0], aff_com[1], s=100, c='red', marker='x', linewidth=2)
+        ax.scatter(unaff_com[0], unaff_com[1], s=100, c='lime', marker='x', linewidth=2)
+
+        # Add COM labels
+        ax.text(aff_com[0], aff_com[1] + 10, 'Aff COM',
+                color='red', ha='center', va='bottom', fontsize=10)
+        ax.text(unaff_com[0], unaff_com[1] + 10, 'Unaff COM',
+                color='lime', ha='center', va='bottom', fontsize=10)
+
         # Add title with measurements
         title = (f"Patient {self.data['patient_id']} - {self.data['timepoint']}\n"
                  f"Lat Ratio: {pillar_data.get('ratio_lateral_avg', 'N/A'):.2f}, "
@@ -98,6 +113,13 @@ class MeasurementVisualizer:
         plt.close(fig)
         return save_path
 
+    # Add helper method to compute COM
+    def _compute_com(self, mask):
+        """Compute center of mass for a mask"""
+        y_indices, x_indices = np.where(mask)
+        if len(y_indices) == 0:
+            return (0, 0)
+        return (np.mean(x_indices), np.mean(y_indices))
     def visualize_eq(self):
         """Visualize EQ with bounding boxes"""
         aff_mask = self.analyzer.rotated_aff_mask

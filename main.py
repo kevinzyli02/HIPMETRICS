@@ -16,7 +16,7 @@ aligned_results = process_all_femoral_heads(
     image_folder,
     output_folder=output_folder,
     visualize=False,
-    max_pairs=10
+    max_pairs=3
 )
 
 # Initialize results collector

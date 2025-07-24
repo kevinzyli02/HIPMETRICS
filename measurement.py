@@ -140,12 +140,8 @@ class PillarMeasurement(BaseMeasurement):
                 self.analyzer.rotated_aff_mask, self.data['affected_laterality']
             )
             unaff_heights = self._calculate_pillar_heights(
-                self.analyzer.rotated_unaff_mask, self.data['unaffected_laterality']
+                self.analyzer.rotated_unaff_mask, self.data['unaffected_laterality'] #since it is already flipped l/r we want to use the same laterality as the affected side
             )
-
-            # Print debug information
-            #print(f"Affected heights: {aff_heights}")
-            #print(f"Unaffected heights: {unaff_heights}")
 
             # Calculate ratios (avoid division by zero)
             ratios = []
