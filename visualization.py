@@ -84,8 +84,8 @@ class MeasurementVisualizer:
         self._draw_pillar_divisions(ax, unaff_mask, self.data['unaffected_laterality'], 'lime')
 
         # Calculate and plot COM
-        aff_com = self._compute_com(aff_mask)
-        unaff_com = self._compute_com(unaff_mask)
+        aff_com = self.analyzer.rotated_aff_com
+        unaff_com = self.analyzer.rotated_unaff_com
 
         # Plot COM markers
         ax.scatter(aff_com[0], aff_com[1], s=100, c='red', marker='x', linewidth=2)
@@ -113,13 +113,7 @@ class MeasurementVisualizer:
         plt.close(fig)
         return save_path
 
-    # Add helper method to compute COM
-    def _compute_com(self, mask):
-        """Compute center of mass for a mask"""
-        y_indices, x_indices = np.where(mask)
-        if len(y_indices) == 0:
-            return (0, 0)
-        return (np.mean(x_indices), np.mean(y_indices))
+
     def visualize_eq(self):
         """Visualize EQ with bounding boxes"""
         aff_mask = self.analyzer.rotated_aff_mask

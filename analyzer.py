@@ -7,6 +7,8 @@ from visualization import FinalMeasurementVisualizer, MeasurementVisualizer
 
 class FemoralHeadAnalyzer:
     def __init__(self, result_dict, images_folder, output_folder):
+        self.rotated_aff_com = None
+        self.rotated_unaff_com = None
         self.data = result_dict
         self.output_folder = Path(output_folder)
         self.output_folder.mkdir(parents=True, exist_ok=True)
@@ -81,6 +83,12 @@ class FemoralHeadAnalyzer:
         new_y = y_rotated + cy
 
         return new_x, new_y
+    def _compute_com(self, mask):
+        """Compute center of mass for a mask"""
+        y_indices, x_indices = np.where(mask)
+        if len(y_indices) == 0:
+            return (0, 0)
+        return (np.mean(x_indices), np.mean(y_indices))
 
     def align_major_axis(self):
         """Rotate masks around center of major axis to make it horizontal and ensure COM is above the axis"""
@@ -91,66 +99,47 @@ class FemoralHeadAnalyzer:
         aff_center = self._get_major_axis_center(self.data['aff_major_axis'])
         unaff_center = self._get_major_axis_center(self.data['trans_unaff_major_axis'])
 
-        # Rotate both masks and their COM points
+        # Rotate both masks using their respective major axis centers
         self.rotated_aff_mask = self._rotate_mask(
             self.data['affected_mask'], angle, center=aff_center
         )
-        aff_com_rot = self._rotate_point(self.data['com_aff'], aff_center, angle)
-
         self.rotated_unaff_mask = self._rotate_mask(
             self.data['transformed_unaff_mask'], angle, center=unaff_center
         )
-        unaff_com_rot = self._rotate_point(self.data['com_unaff_trans'], unaff_center, angle)
 
-        aff_com_rot_180 = self._rotate_point(aff_com_rot, aff_center, 180)
-        unaff_com_rot_180 = self._rotate_point(unaff_com_rot, aff_center, 180)
+        # --- 180° rotation check for unaffected mask ---
+        # Get original center of mass for unaffected mask
+        com_rotated_unaff = self._compute_com(self.rotated_unaff_mask)
+        com_rotated_aff = self._compute_com(self.rotated_aff_mask)
 
+        # Calculate 180 up and down COM positions
+        com_rotated_unaff_180 = self._rotate_point(com_rotated_unaff, unaff_center, 180)
+        com_rotated_aff_180 = self._rotate_point(com_rotated_aff, aff_center, 180)
 
-        # Determine if COM is above the major axis (y < center_y in image coordinates)
-        needs_flip = (aff_com_rot[1] > aff_com_rot_180[1]) or (unaff_com_rot[1] > unaff_center[1])
-
-        if needs_flip:
-            # Flip both masks and update their COM positions
-            self.rotated_aff_mask = self._rotate_mask(
-                self.rotated_aff_mask, 180, center=aff_center
-            )
-            aff_com_rot = self._rotate_point(aff_com_rot, aff_center, 180)
-
+        # Compare y-values and rotate 180° if needed
+        if com_rotated_unaff_180[1] > com_rotated_unaff[1]:
             self.rotated_unaff_mask = self._rotate_mask(
                 self.rotated_unaff_mask, 180, center=unaff_center
             )
-            unaff_com_rot = self._rotate_point(unaff_com_rot, unaff_center, 180)
-
+            self.rotated_aff_mask = self._rotate_mask(
+                self.rotated_aff_mask, 180, center=aff_center
+            )
+            self.rotated_unaff_com = com_rotated_unaff_180
+            self.rotated_aff_com = com_rotated_aff_180
             self.unaff_flipped = True
 
 
         else:
+            self.rotated_unaff_com = com_rotated_unaff
+            self.rotated_aff_com = com_rotated_aff
             self.unaff_flipped = False
 
-        # Store the final COM positions
-        self.aff_com_final = aff_com_rot
-        self.unaff_com_final = unaff_com_rot
-
-        print('affected side')
-        print(f"com before and after rotation: {aff_com_rot[1]} {aff_com_rot_180[1]}")
 
         print('unaffected side side')
-        print(f"com before and after rotation: {unaff_com_rot[1]} {unaff_com_rot_180[1]}")
+        print(f"com before and after rotation: {com_rotated_unaff[1]} {com_rotated_unaff_180[1]}")
+        print(f"did we flip: {self.unaff_flipped}")
 
-    
-        # Flip both masks if either COM is below the major axis
-        if unaff_com_rot[1] > unaff_com_rot_180[1]:
-            self.rotated_aff_mask = self._rotate_mask(
-                self.rotated_aff_mask, 180, center=aff_center
-            )
-            self.rotated_unaff_mask = self._rotate_mask(
-                self.rotated_unaff_mask, 180, center=unaff_center
-            )
-            self.unaff_flipped = True
-        else:
-            self.unaff_flipped = False
 
-        print(f"did we flip it{self.unaff_flipped}")
     def get_results(self):
         """Return all measurements as a dictionary"""
         result = {
