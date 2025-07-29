@@ -8,7 +8,6 @@ from skimage import measure
 from measurement import DIMeasurement
 
 
-# Add to existing visualization.py
 class MeasurementVisualizer:
     def __init__(self, analyzer, output_folder):
         self.analyzer = analyzer
