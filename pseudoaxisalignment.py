@@ -1,4 +1,6 @@
 import json
+from pathlib import Path
+
 import numpy as np
 from skimage.draw import polygon
 from skimage.measure import regionprops

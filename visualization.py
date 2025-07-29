@@ -287,7 +287,54 @@ class FinalMeasurementVisualizer:
     def _plot_lateral_pillar(self, ax):
         ax.imshow(self.original_image, cmap='gray')
         self._draw_mask_outline(ax, self.data['affected_mask'], color='red')
-        self._draw_mask_outline(ax, self.data['transformed_unaff_mask'], color='lime')
+
+        # Get the affected mask
+        aff_mask = self.data['affected_mask']
+        coords = np.argwhere(aff_mask)
+        if coords.size == 0:
+            # Skip if no mask
+            pass
+        else:
+            # Get mask bounding box
+            min_y, min_x = coords.min(axis=0)
+            max_y, max_x = coords.max(axis=0)
+
+            # Get major axis endpoints
+            major_axis = self.data['aff_major_axis']
+            if major_axis:
+                # Extract endpoints
+                (x1, y1), (x2, y2) = major_axis
+
+                # Calculate vector along major axis
+                dx = x2 - x1
+                dy = y2 - y1
+                length = np.sqrt(dx ** 2 + dy ** 2)
+
+                if length > 0:  # Ensure valid axis
+                    # Calculate unit vector along major axis
+                    ux = dx / length
+                    uy = dy / length
+
+                    # Calculate unit vector perpendicular to major axis
+                    vx = -uy
+                    vy = ux
+
+                    # Calculate quarter points along major axis
+                    quarter1 = (x1 + 0.25 * dx, y1 + 0.25 * dy)
+                    quarter3 = (x1 + 0.75 * dx, y1 + 0.75 * dy)
+
+                    # Draw lines at quarter points perpendicular to major axis
+                    for point in [quarter1, quarter3]:
+                        px, py = point
+                        # Calculate line endpoints at top and bottom of mask
+                        top_x = px - vx * abs(max_x-min_x) * 1/2
+                        top_y = py - vy * abs(max_y-min_y) * 1/2
+                        bottom_x = px + vx * abs(max_x-min_x) * 1/2
+                        bottom_y = py + vy * abs(max_y-min_y) * 1/2
+
+                        # Draw the line from top to bottom of mask
+                        ax.plot([top_x, bottom_x], [top_y, bottom_y],
+                                color='blue', linewidth=2, linestyle='-')
 
         ratio = self.analyzer.pillar_measurements.get('ratio_lateral_avg', None)
         ratio_txt = f"{ratio:.2f}" if ratio is not None else "N/A"

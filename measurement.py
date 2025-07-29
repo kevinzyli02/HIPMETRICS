@@ -132,6 +132,29 @@ class PillarMeasurement(BaseMeasurement):
         else:
             return "C"
 
+    def _get_lateral_boundaries(self, mask, laterality):
+        """Calculate lateral pillar boundaries for visualization"""
+        coords = np.argwhere(mask)
+        if coords.size == 0:
+            return None
+
+        min_y, min_x = coords.min(axis=0)
+        max_y, max_x = coords.max(axis=0)
+        width = max_x - min_x
+
+        # Define pillar boundaries
+        left_bound = min_x
+        middle_start = min_x + 0.25 * width
+        middle_end = min_x + 0.75 * width
+        right_bound = max_x
+
+        # Determine lateral pillar boundaries based on laterality
+        if laterality == 'R':
+            return (middle_end, right_bound)  # Right hip: lateral pillar is rightmost
+        else:  # 'L'
+            return (left_bound, middle_start)  # Left hip: lateral pillar is leftmost
+
+
     def calculate(self):
         """Calculate pillar measurements and determine Herring classification"""
         try:

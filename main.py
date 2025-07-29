@@ -16,10 +16,9 @@ aligned_results = process_all_femoral_heads(
     image_folder,
     output_folder=output_folder,
     visualize=False,
-    max_pairs=100
-
+    max_pairs=10
 )
-print(length(aligned_results))
+
 # Initialize results collector
 all_results = []
 
