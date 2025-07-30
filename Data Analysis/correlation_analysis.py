@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+import sys
 import scipy.stats as stats
 from scipy.stats import kruskal, f_oneway, spearmanr, mannwhitneyu
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
@@ -14,7 +15,7 @@ from sklearn.preprocessing import label_binarize
 # Configuration
 PATIENT_DB_PATH = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\patient_database.xlsx'
 MEASUREMENTS_PATH = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\Fragmentation Stage Measurements\measurements_summary.xlsx'
-OUTPUT_DIR = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\Correlation Analysis'
+OUTPUT_DIR = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\Fragmentation Stage Measurements'
 
 # Ensure output directory exists
 os.makedirs(OUTPUT_DIR, exist_ok=True)

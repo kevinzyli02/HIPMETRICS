@@ -1,4 +1,5 @@
 import os
+import sys
 import pandas as pd
 import json
 from collections import defaultdict
@@ -7,7 +8,15 @@ from collections import defaultdict
 COCO_JSON_PATH = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage\output.json'
 IMAGE_FOLDER = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage'
 STULBERG_EXCEL_PATH = r"\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\Stulberg classification model - skeletal maturity\Classification Results\Stulberg classification.xlsx"
-OUTPUT_EXCEL = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\patient_database.xlsx'
+
+# Get the root directory of your project
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# Set the output file directly in the current "Data Analysis" folder
+OUTPUT_EXCEL = os.path.join(PROJECT_ROOT, "patient_database.xlsx")
+
+print(f"Project root: {PROJECT_ROOT}")
+print(f"Output path: {OUTPUT_EXCEL}")
 
 
 def extract_patient_data():
@@ -150,11 +159,16 @@ def main():
     # Merge with Stulberg classifications
     final_db = merge_with_stulberg(patient_df)
 
-    # Ensure output directory exists
-    os.makedirs(os.path.dirname(OUTPUT_EXCEL), exist_ok=True)
-
-    # Save final database
-    final_db.to_excel(OUTPUT_EXCEL, index=False)
+    # Save final database with explicit engine
+    try:
+        final_db.to_excel(OUTPUT_EXCEL, index=False, engine='openpyxl')
+        print(f"\nSuccessfully saved database to {OUTPUT_EXCEL}")
+    except Exception as e:
+        print(f"\nError saving Excel file: {e}")
+        # Fallback to CSV if Excel fails
+        csv_path = OUTPUT_EXCEL.replace('.xlsx', '.csv')
+        final_db.to_csv(csv_path, index=False)
+        print(f"Saved data as CSV instead: {csv_path}")
 
     print(f"\nPatient database created at: {OUTPUT_EXCEL}")
     print(f"Total patients processed: {len(final_db)}")
