@@ -242,6 +242,7 @@ class EQMeasurement(BaseMeasurement):
             'unaff_width': unaff_width,
             'unaff_height': unaff_height,
             'eq_ratio': eq_ratio
+
         }
 
 

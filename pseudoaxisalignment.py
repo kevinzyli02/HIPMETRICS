@@ -1,6 +1,6 @@
+
 import json
 from pathlib import Path
-
 import numpy as np
 from skimage.draw import polygon
 from skimage.measure import regionprops
@@ -29,19 +29,15 @@ def find_medial_lateral_points(head_mask):
     try:
         # Convert to uint8 format required by OpenCV
         mask_uint8 = (head_mask * 255).astype(np.uint8)
-
         # Find contours
         contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None, None
-
         # Get largest contour
         contour = max(contours, key=cv2.contourArea)
         contour = contour.squeeze()
-
         if len(contour) < 2:
             return None, None
-
         # Find points with maximum distance
         max_dist = -1
         pt1, pt2 = None, None
@@ -52,7 +48,6 @@ def find_medial_lateral_points(head_mask):
                     max_dist = dist
                     pt1 = tuple(contour[i])
                     pt2 = tuple(contour[j])
-
         return pt1, pt2
     except Exception as e:
         print(f"Error finding medial/lateral points: {e}")
@@ -62,12 +57,11 @@ def find_medial_lateral_points(head_mask):
 def get_major_minor_axis(mask):
     '''
     FIXED: Calculates major/minor axes using medial/lateral pillars as major axis endpoints.
-            Computes minor_length and returns all required values.
+    Computes minor_length and returns all required values.
     '''
     points_rc = np.argwhere(mask)
     if len(points_rc) < 2:
         return None, None, None, None, None, None
-
     points_xy = points_rc[:, [1, 0]]  # Convert to (x, y)
 
     try:
@@ -80,7 +74,6 @@ def get_major_minor_axis(mask):
         return None, None, None, None, None, None
 
     hull_points = points_xy[hull.vertices]
-
     if len(hull_points) < 2:
         return None, None, None, None, None, None
 
@@ -94,10 +87,8 @@ def get_major_minor_axis(mask):
     major_vector = p2_xy - p1_xy
     center_xy = (p1_xy + p2_xy) / 2.0
     major_length = np.linalg.norm(major_vector)
-
     if major_length < 1e-5:
         return None, None, None, None, None, None
-
     u_major = major_vector / major_length
     u_minor = np.array([-u_major[1], u_major[0]])
 
@@ -116,13 +107,13 @@ def get_major_minor_axis(mask):
 
     return center_xy, u_major, minor_length, major_length, (p1_xy, p2_xy), (minor_end1, minor_end2)
 
+
 def poly_to_mask(poly, width, height):
     '''
     Converts polygon coordinates to a binary mask.
     '''
     if len(poly) == 0:
         return np.zeros((height, width), dtype=bool)
-
     poly = np.array(poly).reshape(-1, 2)
     x = poly[:, 0].clip(0, width - 1)
     y = poly[:, 1].clip(0, height - 1)
@@ -138,13 +129,94 @@ def get_center_of_mass(mask):
     '''
     if np.sum(mask) == 0:
         return None
-
     props = regionprops(mask.astype(np.uint8))
     if not props:
         return None
-
     com_y, com_x = props[0].centroid
     return np.array([com_x, com_y])
+
+
+# ------------------ NEW: oriented greatest-height ⟂ major axis ------------------
+def compute_max_height_perp_major(mask, center_xy, u_major):
+    """
+    Returns the endpoints and length of the maximum-height segment that is
+    perpendicular to the major axis.
+
+    Parameters
+    ----------
+    mask : (H,W) bool
+        Binary mask (head, unrotated).
+    center_xy : (2,) float
+        Center used for local coordinate frame (same one used with the major axis).
+    u_major : (2,) float
+        Unit vector along the major axis.
+
+    Returns
+    -------
+    (p_top, p_bottom, max_height) :
+        p_top, p_bottom are (x,y) in image coordinates. max_height is float (pixels).
+        If mask is empty or inputs invalid, returns (None, None, 0.0).
+    """
+    if mask is None or not np.any(mask):
+        return (None, None, 0.0)
+    if u_major is None or center_xy is None or np.linalg.norm(u_major) < 1e-8:
+        return (None, None, 0.0)
+
+    u_major = np.asarray(u_major, dtype=float)
+    u_major /= max(np.linalg.norm(u_major), 1e-8)
+    u_minor = np.array([-u_major[1], u_major[0]], dtype=float)
+
+    # Collect mask points (x,y)
+    pts_rc = np.argwhere(mask)             # (row=y, col=x)
+    pts_xy = pts_rc[:, [1, 0]].astype(float)
+
+    # Local coordinates relative to center
+    rel = pts_xy - np.asarray(center_xy, dtype=float)
+
+    # Project to local frame: x' along u_major, y' along u_minor
+    xprime = rel.dot(u_major)   # shape (N,)
+    yprime = rel.dot(u_minor)   # shape (N,)
+
+    # Bin by x' (integer rounding for stability)
+    xbins = np.round(xprime).astype(int)
+
+    # Iterate unique bins to find max (ymax - ymin)
+    order = np.argsort(xbins)
+    xbins_sorted = xbins[order]
+    yprime_sorted = yprime[order]
+
+    max_height = 0.0
+    best_xbin = None
+    best_ymin = None
+    best_ymax = None
+
+    i = 0
+    while i < len(xbins_sorted):
+        xb = xbins_sorted[i]
+        j = i
+        while j < len(xbins_sorted) and xbins_sorted[j] == xb:
+            j += 1
+        yseg = yprime_sorted[i:j]
+        if yseg.size > 0:
+            ymin = float(np.min(yseg))
+            ymax = float(np.max(yseg))
+            thickness = ymax - ymin
+            if thickness > max_height:
+                max_height = thickness
+                best_xbin = float(xb)
+                best_ymin = ymin
+                best_ymax = ymax
+        i = j
+
+    if best_xbin is None:
+        return (None, None, 0.0)
+
+    # Reconstruct endpoints in original coordinates:
+    # p = center + u_major * x' + u_minor * y'
+    p_top    = np.asarray(center_xy, dtype=float) + u_major * best_xbin + u_minor * best_ymin
+    p_bottom = np.asarray(center_xy, dtype=float) + u_major * best_xbin + u_minor * best_ymax
+
+    return (p_top, p_bottom, max_height)
 
 
 def find_femoral_head_pairs(coco_json_path, max_pairs=None):
@@ -173,28 +245,22 @@ def find_femoral_head_pairs(coco_json_path, max_pairs=None):
     # Find femoral head pairs with limit
     pairs = []
     processed_pairs = set()
-
     for img_id, anns in image_annotations.items():
         if not anns:
             continue
-
         img_info = image_id_to_info[img_id]
         filename = img_info['file_name']
-
         # Extract patient ID and timepoint
         parts = filename.split('_')
         if len(parts) < 5:
             continue
-
         patient_id = parts[1]
         timepoint = '_'.join(parts[3:5])
         laterality = parts[-1].split('.')[0]
-
         if laterality not in ['L', 'R']:
             continue
 
         pair_key = (patient_id, timepoint)
-
         if pair_key in processed_pairs:
             continue
 
@@ -203,21 +269,18 @@ def find_femoral_head_pairs(coco_json_path, max_pairs=None):
         for other_id, other_anns in image_annotations.items():
             if other_id == img_id or not other_anns:
                 continue
-
             other_info = image_id_to_info[other_id]
             other_file = other_info['file_name']
             other_parts = other_file.split('_')
-
             if len(other_parts) < 5:
                 continue
-
             other_patient = other_parts[1]
             other_time = '_'.join(other_parts[3:5])
             other_lat = other_parts[-1].split('.')[0]
 
             if (other_patient == patient_id and
-                    other_time == timepoint and
-                    other_lat == opposite):
+                other_time == timepoint and
+                other_lat == opposite):
                 pairs.append({
                     'patient_id': patient_id,
                     'timepoint': timepoint,
@@ -242,11 +305,9 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
     '''
     # Create head dictionaries
     heads = []
-
     for img_key, ann_key in [('left_img', 'left_ann'), ('right_img', 'right_ann')]:
         img_info = pair[img_key]
         ann = pair[ann_key]
-
         width = img_info['width']
         height = img_info['height']
         poly = ann['segmentation'][0]
@@ -262,7 +323,6 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
         if any(d is None for d in axis_data):
             print(f"Failed to calculate axis for {img_info['file_name']}")
             return None
-
         center_xy, u_major, minor_length, major_length, major_ends, minor_ends = axis_data
 
         # Get center of mass
@@ -270,6 +330,9 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
         if com is None:
             print(f"Failed to get COM for {img_info['file_name']}")
             return None
+
+        # NEW: compute the greatest height line perpendicular to the major axis (for each head)
+        h_top, h_bottom, h_len = compute_max_height_perp_major(mask, center_xy, u_major)
 
         # Store only necessary data
         heads.append({
@@ -285,7 +348,11 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
             'original_u_major': u_major.copy(),
             'original_com': com.copy(),
             'major_axis_ends': major_ends,
-            'minor_axis_ends': minor_ends
+            'minor_axis_ends': minor_ends,
+            'major_length': float(major_length),
+            # NEW: max-height (perp to major axis)
+            'max_height_line': (h_top, h_bottom),
+            'max_height_length': float(h_len),
         })
 
     # Identify affected and unaffected
@@ -317,15 +384,14 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
 
     # Rotation matrices
     R0 = np.array([[np.cos(theta), -np.sin(theta)],
-                   [np.sin(theta), np.cos(theta)]])
+                   [np.sin(theta),  np.cos(theta)]])
     R180 = np.array([[np.cos(theta + np.pi), -np.sin(theta + np.pi)],
-                     [np.sin(theta + np.pi), np.cos(theta + np.pi)]])
+                     [np.sin(theta + np.pi),  np.cos(theta + np.pi)]])
 
     # COM distances
     offset = flipped_com - flipped_center
     com0 = R0 @ offset + affected['center_xy']
     com180 = R180 @ offset + affected['center_xy']
-
     dist0 = np.linalg.norm(com0 - affected['com'])
     dist180 = np.linalg.norm(com180 - affected['com'])
 
@@ -385,7 +451,13 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
         'unaff_major_axis': unaffected['major_axis_ends'],
         'trans_unaff_major_axis': (trans_major_end1, trans_major_end2),
         'aff_minor_axis': affected['minor_axis_ends'],
-        'trans_unaff_minor_axis': trans_unaff_minor_ends
+        'trans_unaff_minor_axis': trans_unaff_minor_ends,
+        # Lengths
+        'aff_major_length': affected.get('major_length', 0.0),
+        'unaff_major_length': unaffected.get('major_length', 0.0),
+        # NEW: affected greatest-height line ⟂ major axis
+        'aff_max_height_line': affected.get('max_height_line', (None, None)),
+        'aff_max_height_length': affected.get('max_height_length', 0.0),
     }
 
     # Visualization
@@ -394,23 +466,24 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
 
     return results
 
+
 def visualize_results(results, pair, image_folder, output_folder):
     '''
     UPDATED: Visualizes results with medial/lateral points as major axis endpoints
-             and minor axis stored in results dictionary.
+    and minor axis stored in results dictionary.
     '''
     # Load images
     aff_img = np.array(Image.open(
         os.path.join(image_folder, results['aff_img_info']['file_name'])
     ).convert('L'))
-
     unaff_img = np.array(Image.open(
         os.path.join(image_folder, results['unaff_img_info']['file_name'])
     ).convert('L'))
 
     # Setup figure - 1 row x 3 columns
     fig, ax = plt.subplots(1, 3, figsize=(18, 6))
-    fig.suptitle(f"Patient {pair['patient_id']} - {pair['timepoint']} | Dist: {results['dist']:.1f}px", fontsize=16)
+    fig.suptitle(f"Patient {pair['patient_id']} - {pair['timepoint']}\n"
+                 f"Dist: {results['dist']:.1f}px", fontsize=16)
 
     # Extract axis endpoints
     aff_major_end1, aff_major_end2 = results['aff_major_axis']
@@ -457,20 +530,19 @@ def visualize_results(results, pair, image_folder, output_folder):
     # 3. Aligned Overlay (simplified)
     ax[2].imshow(aff_img, cmap='gray')
     ax[2].contour(results['affected_mask'], colors='red', linewidths=1, label='affected head')
-    ax[2].contour(results['transformed_unaff_mask'], colors='lime', linewidths=1, linestyles='dashed', label='flipped unaffected head')
+    ax[2].contour(results['transformed_unaff_mask'], colors='lime', linewidths=1,
+                  linestyles='dashed', label='flipped unaffected head')
     ax[2].scatter(results['com_aff'][0], results['com_aff'][1], s=40, c='red', marker='.')
-    ax[2].scatter(results['com_unaff_trans'][0], results['com_unaff_trans'][1], s=40, c ='lime', marker='.')
+    ax[2].scatter(results['com_unaff_trans'][0], results['com_unaff_trans'][1], s=40, c='lime', marker='.')
     ax[2].set_title('Aligned Overlay')
-
     ax[2].axis('off')
 
     plt.tight_layout()
-
-    # Save visualization
     output_folder = Path(output_folder) / "final viz"
     viz_path = os.path.join(output_folder, f"Patient_{pair['patient_id']}_{pair['timepoint']}_alignment.png")
     plt.savefig(viz_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
+
 
 def process_all_femoral_heads(coco_json_path, image_folder, output_folder=None,
                               visualize=False, max_pairs=None):
@@ -488,7 +560,6 @@ def process_all_femoral_heads(coco_json_path, image_folder, output_folder=None,
     results = []
     total_pairs = len(pairs)
     start_time = time.time()
-
     for i, pair in enumerate(pairs):
         pair_start = time.time()
         res = process_femoral_head_pair(
@@ -496,12 +567,10 @@ def process_all_femoral_heads(coco_json_path, image_folder, output_folder=None,
             visualize=visualize,
             output_folder=output_folder
         )
-
         if res:
             results.append(res)
-            elapsed = time.time() - pair_start
-            print(f"Processed {pair['patient_id']}-{pair['timepoint']} ({i + 1}/{total_pairs}) in {elapsed:.2f}s")
-
+        elapsed = time.time() - pair_start
+        print(f"Processed {pair['patient_id']}-{pair['timepoint']} ({i + 1}/{total_pairs}) in {elapsed:.2f}s")
     total_time = time.time() - start_time
     print(f"Processed {len(results)} femoral head pairs in {total_time:.2f} seconds")
     return results
@@ -510,9 +579,8 @@ def process_all_femoral_heads(coco_json_path, image_folder, output_folder=None,
 # Main execution
 if __name__ == "__main__":
     coco_json_path = r'C:\Users\SR207348\Downloads\labels_ipsg102_2025-06-30-08-40-52.json'
-    image_folder = r'C:\Users\SR207348\Downloads\ipsg102\ipsg102'
-    output_folder = r"C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\ipsg102_DI"
-
+    image_folder   = r'C:\Users\SR207348\Downloads\ipsg102\ipsg102'
+    output_folder  = r"Y:\Clinical Research\KIM\STUDENTS\Kevin Li\HIPMETRICS\visualizaiton_pre"
     os.makedirs(output_folder, exist_ok=True)
 
     # Process only 10 hips with simplified visualization

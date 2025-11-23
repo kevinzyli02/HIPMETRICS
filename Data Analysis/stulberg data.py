@@ -2,12 +2,14 @@ import os
 import sys
 import pandas as pd
 import json
+import re
 from collections import defaultdict
 
 # Configuration - Fixed paths
 COCO_JSON_PATH = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage\output.json'
 IMAGE_FOLDER = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage'
 STULBERG_EXCEL_PATH = r"\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\Stulberg classification model - skeletal maturity\Classification Results\Stulberg classification.xlsx"
+DEMOGRAPHICS_CSV = r"C:\Users\SR207348\OneDrive - Scottish Rite for Children\Kim Research\HIPMETRICS-lateral pillar\radiographdemographics.csv"
 
 # Get the root directory of your project
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -55,7 +57,7 @@ def extract_patient_data():
         elif view == 'Frog':
             patient_stats[patient_id]['frog_count'] += 1
 
-        # Extract timepoint from filename (third component)
+        # Extract timepoint from filename
         parts = os.path.splitext(filename)[0].split('_')
         if len(parts) >= 3:
             patient_stats[patient_id]['timepoints'].add(parts[2])
@@ -75,13 +77,13 @@ def extract_patient_data():
 
 
 def parse_filename(filename):
-    """Extract patient ID and view from filename (handles two formats)"""
+    """Extract patient ID and view from filename (handles multiple formats)"""
     base = os.path.splitext(filename)[0]
     parts = base.split('_')
 
-    # Handle "Patient_X" format
-    if parts[0].lower() == 'patient':
-        patient_id = parts[1] if len(parts) > 1 else 'unknown'
+    # Handle "Patient_XXXX" format (e.g., "Patient_1003_ap_initial_L")
+    if parts[0].lower() == 'patient' and len(parts) > 1:
+        patient_id = parts[1]  # Extract the numeric ID
         view_part = parts[2].lower() if len(parts) > 2 else ''
     # Handle "X_view" format
     else:
@@ -112,10 +114,19 @@ def merge_with_stulberg(patient_df):
                 return None
             base = os.path.splitext(os.path.basename(filename))[0]
             parts = base.split('_')
-            return parts[1] if parts[0].lower() == 'patient' else parts[0]
+
+            # Handle "Patient_XXXX" format
+            if parts[0].lower() == 'patient' and len(parts) > 1:
+                return parts[1]  # Extract the numeric ID
+            # Handle other formats
+            else:
+                return parts[0]
 
         stulberg_df['patient_id'] = stulberg_df['BMP file name'].apply(extract_id_from_filename)
         stulberg_df = stulberg_df.dropna(subset=['patient_id'])
+
+        # Keep only the first entry for each patient
+        stulberg_df = stulberg_df.drop_duplicates(subset=['patient_id'], keep='first')
 
     except Exception as e:
         print(f"Error processing Stulberg file: {e}")
@@ -139,10 +150,53 @@ def merge_with_stulberg(patient_df):
     merged_df.rename(columns={stulberg_col: 'stulberg_classification'}, inplace=True)
     return merged_df
 
+
+def merge_with_demographics(patient_df):
+    """Merge patient data with radiograph demographics to add laterality and gender."""
+    try:
+        demo_df = pd.read_csv(DEMOGRAPHICS_CSV)
+        print("Columns in demographics file:", demo_df.columns.tolist())
+
+        # Rename 5th column (index 4) to "laterality" and 6th column (index 5) to "gender"
+        demo_df = demo_df.rename(columns={
+            demo_df.columns[4]: 'laterality',
+            demo_df.columns[5]: 'gender'
+        })
+
+        # Ensure patient_id exists
+        if 'patient_id' not in demo_df.columns:
+            # Extract patient ID from first column if it contains Patient_XXXX format
+            def extract_patient_id(value):
+                if isinstance(value, str) and 'patient' in value.lower():
+                    match = re.search(r'patient[_\s]*(\d+)', value.lower())
+                    if match:
+                        return match.group(1)
+                return str(value)
+
+            demo_df['patient_id'] = demo_df.iloc[:, 0].apply(extract_patient_id)
+
+        # Keep only the first entry for each patient
+        demo_df = demo_df.drop_duplicates(subset=['patient_id'], keep='first')
+
+        merged = pd.merge(patient_df, demo_df[['patient_id', 'laterality', 'gender']], on='patient_id', how='left')
+        return merged
+
+    except Exception as e:
+        print(f"Error merging demographics file: {e}")
+        return patient_df
+
+
+def add_stulberg_flag(df):
+    """Add has_stulberg column (1 if classification exists, else 0)."""
+    df['has_stulberg'] = df['stulberg_classification'].apply(lambda x: 1 if pd.notna(x) else 0)
+    return df
+
+
 def main():
     print("Starting patient data processing...")
     print(f"COCO JSON path: {COCO_JSON_PATH}")
     print(f"Stulberg Excel path: {STULBERG_EXCEL_PATH}")
+    print(f"Demographics CSV path: {DEMOGRAPHICS_CSV}")
     print(f"Output will be saved to: {OUTPUT_EXCEL}")
 
     # Extract patient data from COCO JSON
@@ -159,13 +213,18 @@ def main():
     # Merge with Stulberg classifications
     final_db = merge_with_stulberg(patient_df)
 
+    # Merge with demographics (laterality and gender)
+    final_db = merge_with_demographics(final_db)
+
+    # Add has_stulberg flag
+    final_db = add_stulberg_flag(final_db)
+
     # Save final database with explicit engine
     try:
         final_db.to_excel(OUTPUT_EXCEL, index=False, engine='openpyxl')
         print(f"\nSuccessfully saved database to {OUTPUT_EXCEL}")
     except Exception as e:
         print(f"\nError saving Excel file: {e}")
-        # Fallback to CSV if Excel fails
         csv_path = OUTPUT_EXCEL.replace('.xlsx', '.csv')
         final_db.to_csv(csv_path, index=False)
         print(f"Saved data as CSV instead: {csv_path}")
@@ -179,11 +238,21 @@ def main():
     # Summary statistics
     print("\nSummary:")
     print(f"- Total patients: {len(final_db)}")
-    print(f"- Patients with Stulberg classification: {final_db['stulberg_classification'].count()}")
+    print(f"- Patients with Stulberg classification: {final_db['has_stulberg'].sum()}")
     print(f"- AP X-rays: {final_db['ap_count'].sum()}")
     print(f"- Frog X-rays: {final_db['frog_count'].sum()}")
     print(f"- Total X-rays: {final_db['total_xrays'].sum()}")
     print(f"- Average timepoints per patient: {final_db['timepoints'].mean():.1f}")
+
+    # Laterality summary
+    print("\nLaterality Summary:")
+    if 'laterality' in final_db.columns:
+        laterality_counts = final_db['laterality'].value_counts()
+        for value, count in laterality_counts.items():
+            print(f"- {value}: {count} patients")
+        print(f"- Unknown/NaN: {final_db['laterality'].isna().sum()} patients")
+    else:
+        print("- Laterality data not available")
 
 
 if __name__ == '__main__':

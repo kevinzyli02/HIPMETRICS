@@ -11,11 +11,18 @@ import statsmodels.api as sm
 from statsmodels.miscmodels.ordinal_model import OrderedModel
 from sklearn.metrics import roc_curve, auc, roc_auc_score
 from sklearn.preprocessing import label_binarize
+from visualization import create_summary_figure
 
+# Get the root directory of your project
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# Set the output file directly in the current "Data Analysis" folder
+PATIENT_DB_PATH= os.path.join(PROJECT_ROOT, "patient_database.xlsx")
 # Configuration
-PATIENT_DB_PATH = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\patient_database.xlsx'
-MEASUREMENTS_PATH = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\Fragmentation Stage Measurements\measurements_summary.xlsx'
-OUTPUT_DIR = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Documents\Radiographic Annotations\Fragmentation Stage Measurements'
+MEASUREMENTS_PATH = r'C:\Users\SR207348\PycharmProjects\HIPMETRICS\Data Analysis\measurements_summary.xlsx'
+OUTPUT_DIR = PROJECT_ROOT
+
+
 
 # Ensure output directory exists
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -43,108 +50,195 @@ def main():
     perform_ordinal_regression(merged)
 
     # 4. Threshold Analysis
-    perform_threshold_analysis(merged)
+    results = perform_threshold_analysis(merged)
 
     print(f"Analysis complete. Results saved to: {OUTPUT_DIR}")
 
+    # After analyses, create summary figure
+    di_roc = results['deformity_index']  # From threshold_analysis results
+
+    # Get optimal threshold for DI
+    di_threshold = di_roc['optimal_threshold']
+    sensitivity = di_roc['sensitivity']
+    specificity = di_roc['specificity']
+
+    # Load ordinal regression coefficients
+    coef_path = os.path.join(OUTPUT_DIR, 'ordinal_regression_coefficients.xlsx')
+    coef_df = pd.read_excel(coef_path)
+
+    # Create the figure
+    create_summary_figure(merged, coef_df, di_threshold, sensitivity, specificity, OUTPUT_DIR)
+
+    print(f"Saved clinical summary figure to {OUTPUT_DIR}")
 
 def preprocess_and_merge(patients, measurements):
     """Clean and merge patient data with measurements"""
-    # Clean Stulberg classifications
     patients_clean = patients.copy()
 
-    # Map Stulberg classes to ordinal scale (I=1, II=2, III=3, IV=4, V=5)
-    stulberg_map = {'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5}
-    patients_clean['stulberg_ordinal'] = (
-        patients['stulberg_classification']
-        .str.extract(r'([IV]+)', expand=False)  # Extract roman numerals
-        .map(stulberg_map)
-    )
+    # Convert to string first to handle both numeric and Roman numeral formats
+    stulberg_str = patients['stulberg_classification'].astype(str)
 
-    # Create Stulberg groups for ANOVA
-    patients_clean['stulberg_group'] = np.select(
-        [
-            patients_clean['stulberg_ordinal'].isin([1, 2]),
-            patients_clean['stulberg_ordinal'] == 3,
-            patients_clean['stulberg_ordinal'].isin([4, 5])
-        ],
-        ['I/II', 'III', 'IV/V'],
-        default=np.nan
-    )
+    # Map Stulberg classes to ordinal scale (1=1, 2=2, 3=3, 4=4, 5=5, I=1, II=2, III=3, IV=4, V=5)
+    stulberg_map = {
+        '1': 1, 'I': 1,
+        '2': 2, 'II': 2,
+        '3': 3, 'III': 3,
+        '4': 4, 'IV': 4,
+        '5': 5, 'V': 5
+    }
+
+    # Extract first character set (works for both numbers and Roman numerals)
+    extracted = stulberg_str.str.extract(r'(\d+|I{1,3}|IV|V)', expand=False)
+
+    # Map to ordinal scale
+    patients_clean['stulberg_ordinal'] = extracted.map(stulberg_map)
+
+    # Create Stulberg groups for ANOVA - FIXED TYPE ISSUE
+    conditions = [
+        patients_clean['stulberg_ordinal'].isin([1, 2]),
+        patients_clean['stulberg_ordinal'] == 3,
+        patients_clean['stulberg_ordinal'].isin([4, 5])
+    ]
+
+    choices = ['I/II', 'III', 'IV/V']
+
+    # Initialize with None (object type)
+    patients_clean['stulberg_group'] = None
+
+    # Assign values based on conditions
+    for cond, choice in zip(conditions, choices):
+        patients_clean.loc[cond, 'stulberg_group'] = choice
 
     # Create binary outcome for ROC analysis
     patients_clean['favorable_outcome'] = patients_clean['stulberg_ordinal'].isin([1, 2]).astype(int)
 
     # Merge datasets
-    return pd.merge(
+    merged = pd.merge(
         patients_clean,
         measurements,
         on='patient_id',
         how='inner'
-    ).dropna(subset=['stulberg_ordinal', 'stulberg_group'])
+    )
+
+    # Drop rows with missing group or ordinal
+    return merged.dropna(subset=['stulberg_ordinal', 'stulberg_group'])
 
 
 def perform_group_comparisons(data):
     """ANOVA/Kruskal-Wallis with post-hoc tests for group comparisons"""
     results = {}
 
+    # Print group counts for debugging
+    print("\nStulberg Group Counts:")
+    print(data['stulberg_group'].value_counts())
+
     for measurement in ['lateral_ratio', 'eq_ratio', 'deformity_index']:
         print(f"\n===== Group Comparisons: {measurement} =====")
 
         # Extract measurement values by group
-        groups = [data[data['stulberg_group'] == group][measurement]
+        groups = [data[data['stulberg_group'] == group][measurement].dropna()
                   for group in ['I/II', 'III', 'IV/V']]
 
-        # Normality test (Shapiro-Wilk)
-        norm_test = stats.shapiro(data[measurement])
-        print(f"Normality test (p={norm_test.pvalue:.4f}): {'Normal' if norm_test.pvalue > 0.05 else 'Non-normal'}")
+        # Filter out empty groups
+        valid_groups = [g for g in groups if len(g) >= 3]
+        group_names = ['I/II', 'III', 'IV/V'][:len(valid_groups)]
 
-        # Equal variance test (Levene)
-        var_test = stats.levene(*groups)
-        print(f"Equal variance test (p={var_test.pvalue:.4f}): {'Equal' if var_test.pvalue > 0.05 else 'Unequal'}")
+        if len(valid_groups) < 2:
+            print(f"Not enough groups with sufficient data (need at least 2 groups with ≥3 samples)")
+            results[measurement] = {
+                'test': 'Skipped',
+                'reason': f"Only {len(valid_groups)} valid groups",
+                'p_value': np.nan
+            }
+            continue
+
+        # Normality test (Shapiro-Wilk) - only if sample size ≤5000
+        if len(data[measurement]) <= 5000:
+            norm_test = stats.shapiro(data[measurement])
+            print(f"Normality test (p={norm_test.pvalue:.4f}): {'Normal' if norm_test.pvalue > 0.05 else 'Non-normal'}")
+            normal_dist = norm_test.pvalue > 0.05
+        else:
+            print("Sample size too large for Shapiro-Wilk, assuming non-normal")
+            normal_dist = False
+
+        # Equal variance test (Levene) only if ≥3 groups with ≥3 samples
+        if len(valid_groups) >= 3:
+            try:
+                var_test = stats.levene(*valid_groups)
+                print(
+                    f"Equal variance test (p={var_test.pvalue:.4f}): {'Equal' if var_test.pvalue > 0.05 else 'Unequal'}")
+                equal_var = var_test.pvalue > 0.05
+            except Exception as e:
+                print(f"Levene test failed: {e}")
+                equal_var = False
+        else:
+            print("Skipping Levene test (need ≥3 groups)")
+            equal_var = False  # Conservative assumption
 
         # Choose appropriate test
-        if norm_test.pvalue > 0.05 and var_test.pvalue > 0.05:
+        if normal_dist and equal_var:
             # Parametric ANOVA
-            anova_result = f_oneway(*groups)
+            anova_result = f_oneway(*valid_groups)
             print(f"ANOVA: F={anova_result.statistic:.3f}, p={anova_result.pvalue:.4f}")
             test_type = "ANOVA"
 
-            # Tukey HSD post-hoc
-            if anova_result.pvalue < 0.05:
-                tukey = pairwise_tukeyhsd(
-                    endog=data[measurement],
-                    groups=data['stulberg_group'],
-                    alpha=0.05
-                )
-                print(tukey)
+            # Tukey HSD post-hoc only if ≥3 groups
+            if anova_result.pvalue < 0.05 and len(valid_groups) >= 3:
+                try:
+                    tukey = pairwise_tukeyhsd(
+                        endog=data[measurement],
+                        groups=data['stulberg_group'],
+                        alpha=0.05
+                    )
+                    print(tukey)
+                    results[measurement] = {
+                        'test': 'ANOVA',
+                        'p_value': anova_result.pvalue,
+                        'post_hoc': str(tukey)
+                    }
+                except Exception as e:
+                    print(f"Tukey HSD failed: {e}")
+                    results[measurement] = {
+                        'test': 'ANOVA',
+                        'p_value': anova_result.pvalue,
+                        'post_hoc': f"Error: {e}"
+                    }
+            else:
                 results[measurement] = {
                     'test': 'ANOVA',
                     'p_value': anova_result.pvalue,
-                    'post_hoc': str(tukey)
+                    'post_hoc': 'Not performed (p≥0.05 or <3 groups)'
                 }
         else:
             # Non-parametric Kruskal-Wallis
-            kruskal_result = kruskal(*groups)
-            print(f"Kruskal-Wallis: H={kruskal_result.statistic:.3f}, p={kruskal_result.pvalue:.4f}")
-            test_type = "Kruskal-Wallis"
-            results[measurement] = {
-                'test': 'Kruskal-Wallis',
-                'p_value': kruskal_result.pvalue,
-                'post_hoc': 'N/A'  # Will add Dunn's test in practice
-            }
+            try:
+                kruskal_result = kruskal(*valid_groups)
+                print(f"Kruskal-Wallis: H={kruskal_result.statistic:.3f}, p={kruskal_result.pvalue:.4f}")
+                test_type = "Kruskal-Wallis"
+                results[measurement] = {
+                    'test': 'Kruskal-Wallis',
+                    'p_value': kruskal_result.pvalue,
+                    'post_hoc': 'N/A'  # Dunn's test could be added later
+                }
+            except Exception as e:
+                print(f"Kruskal-Wallis failed: {e}")
+                test_type = "Failed"
+                results[measurement] = {
+                    'test': 'Error',
+                    'p_value': np.nan,
+                    'post_hoc': f"Error: {e}"
+                }
 
-        # Visualization
+        # Visualization only if we have valid groups
         plt.figure(figsize=(10, 6))
         sns.boxplot(x='stulberg_group', y=measurement, data=data,
                     order=['I/II', 'III', 'IV/V'])
-        plt.title(f'{measurement} by Stulberg Group\n({test_type} p={results[measurement]["p_value"]:.4f})')
+        plt.title(f'{measurement} by Stulberg Group\n{test_type}')
         plt.savefig(os.path.join(OUTPUT_DIR, f'group_comparison_{measurement}.png'), dpi=300)
         plt.close()
 
     # Save results
     pd.DataFrame(results).T.to_excel(os.path.join(OUTPUT_DIR, 'group_comparisons.xlsx'))
-
 
 def perform_ordinal_correlation(data):
     """Spearman's correlation between measurements and Stulberg ordinal"""
@@ -193,9 +287,6 @@ def perform_ordinal_regression(data):
     X = model_data[['lateral_ratio', 'eq_ratio', 'deformity_index']]
     y = model_data['stulberg_cat']
 
-    # Add constant for intercept
-    X = sm.add_constant(X)
-
     # Fit ordinal logistic regression
     model = OrderedModel(y, X)
     result = model.fit(method='bfgs', disp=False)
@@ -208,18 +299,20 @@ def perform_ordinal_regression(data):
     with open(os.path.join(OUTPUT_DIR, 'ordinal_regression.txt'), 'w') as f:
         f.write(result.summary().as_text())
 
+    # Get all parameter names (thresholds + predictors)
+    param_names = result.model.exog_names
+
     # Save coefficients
     coef_df = pd.DataFrame({
-        'Predictor': ['const'] + X.columns.tolist()[1:],
+        'Parameter': param_names,
         'Coefficient': result.params,
         'SE': result.bse,
         'p_value': result.pvalues
     })
+
     coef_df.to_excel(os.path.join(OUTPUT_DIR, 'ordinal_regression_coefficients.xlsx'), index=False)
 
     return result
-
-
 def perform_threshold_analysis(data):
     """ROC analysis for favorable vs unfavorable outcomes"""
     results = {}
