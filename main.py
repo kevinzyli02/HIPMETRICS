@@ -7,7 +7,7 @@ from analyzer import FemoralHeadAnalyzer
 
 # File Paths
 coco_json_path = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage\output.json'
-image_folder = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\StulbergInstitutionSplit\TSRH'
+image_folder = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage'
 img_output_folder = r'Y:\Clinical Research\KIM\STUDENTS\Kevin Li\HIPMETRICS\TSRH_viz'
 # Get the root directory of your project (where the script is located)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +25,7 @@ aligned_results = process_all_femoral_heads(
     image_folder,
     output_folder=img_output_folder,
     visualize=False,
+    #max_pairs = 10
 
 )
 

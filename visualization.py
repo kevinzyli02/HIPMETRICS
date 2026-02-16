@@ -17,7 +17,7 @@ class MeasurementVisualizer:
         self.output_folder = Path(output_folder)
         self.output_folder.mkdir(parents=True, exist_ok=True)
 
-    def _apply_zoom(self, ax, mask, margin=20):
+    def _apply_zoom(self, ax, mask, margin=60):
         """
         Zoom the axis to the bounding box of a boolean mask.
         Keeps aspect equal and uses image coordinates (origin='upper').
@@ -132,7 +132,7 @@ class MeasurementVisualizer:
 
         # Zoom to union of both masks
         union = np.logical_or(aff_mask, unaff_mask)
-        self._apply_zoom(ax, union, margin=20)
+        self._apply_zoom(ax, union, margin=60)
 
         # Add labels
         self._draw_label(ax, "Affected", 'red', 0.05, 0.95)
@@ -205,7 +205,7 @@ class MeasurementVisualizer:
 
         # Zoom to union for shared context
         union = np.logical_or(aff_mask, unaff_mask)
-        self._apply_zoom(ax, union, margin=20)
+        self._apply_zoom(ax, union, margin=60)
 
         # Save and close
         lateral_folder = self.output_folder / "lateral_pillar_viz"
@@ -251,7 +251,7 @@ class MeasurementVisualizer:
 
         # Zoom to union (so both boxes fully visible)
         union = np.logical_or(aff_mask, unaff_mask)
-        self._apply_zoom(ax, union, margin=20)
+        self._apply_zoom(ax, union, margin=60)
 
         # Save and close
         eq_folder = self.output_folder / "eq_viz"
@@ -321,7 +321,7 @@ class FinalMeasurementVisualizer:
         min_y, max_y = min(ys), max(ys)
         return (min_x, max_x, min_y, max_y)
 
-    def _apply_zoom(self, ax, masks_or_mask, margin=None):
+    def _apply_zoom(self, ax, masks_or_mask, margin=100):
         """Set xlim/ylim to the bounding box of one mask or a list of masks."""
         margin = self.zoom_margin if margin is None else margin
         if isinstance(masks_or_mask, (list, tuple)):
@@ -421,7 +421,7 @@ class FinalMeasurementVisualizer:
             (x1, y1), (x2, y2) = major
             ax.plot([x1, x2], [y1, y2], color='white', linewidth=2, alpha=0.9, label='Major Axis')
             width_len_px = self._line_length((x1, y1), (x2, y2))
-            self._annotate_line_length(ax, (x1, y1), (x2, y2), f"Width: {width_len_px:.1f}px", color='white')
+            #self._annotate_line_length(ax, (x1, y1), (x2, y2), f"Width: {width_len_px:.1f}px", color='white')
 
         # 2) Greatest height perpendicular to major axis
         height_line = self.data.get('aff_max_height_line')  # (p_top, p_bottom)
@@ -429,7 +429,7 @@ class FinalMeasurementVisualizer:
             (hx1, hy1), (hx2, hy2) = height_line
             ax.plot([hx1, hx2], [hy1, hy2], color='cyan', linewidth=2, alpha=0.9, label='Max ⟂ Height')
             height_len_px = self._line_length((hx1, hy1), (hx2, hy2))
-            self._annotate_line_length(ax, (hx1, hy1), (hx2, hy2), f"Height: {height_len_px:.1f}px", color='cyan')
+            #self._annotate_line_length(ax, (hx1, hy1), (hx2, hy2), f"Height: {height_len_px:.1f}px", color='cyan')
 
         # Optional: keep minor axis (existing) for reference
         #if self.data.get('aff_minor_axis'):
