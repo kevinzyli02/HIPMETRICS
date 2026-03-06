@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Institutional 80/20 Split — Patients & Images, FAST
-RAW waldenstrom_stage is balanced at the **image level** (all radiographs),
-NOT the deduped patient-level representative row.
+Institutional 80/20 Split — Patients & Images
 
-Also:
-- size_penalty = 1.0, image_penalty = 1.0
-- IIb/IIIa subset analysis: include ALL IIb/IIIa patients; keep lateral pillar as a row (missing -> 'Not Reported')
-- Restores '02_stats_tests' worksheet with KS/chi-square tests (patient-level + image-level Waldenström).
+- Uses `stulberg_stage` as the Stulberg source everywhere (patient-level + image-level reports/figures).
+- RAW waldenstrom_stage is balanced at the **image level** (all radiographs).
+- Fix: age-bin label bug (returns full label list).
+- Subset page (sheet 09) now targets **IIb + IIa**, does **not** require LP to be present,
+  and reports **both patients and radiographs** by split; LP distribution is optional info.
+- NEW: **Exclude Stulberg = 'Unknown'** from all calculations, statistics, and figures.
 """
 
 import argparse
@@ -21,7 +20,6 @@ import re
 import shutil
 import tempfile
 from datetime import datetime
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -33,7 +31,6 @@ try:
 except Exception:
     SCIPY_AVAILABLE = False
 
-
 # =========================
 # Defaults (override via CLI)
 # =========================
@@ -44,34 +41,32 @@ DEFAULT_COLS = {
     "gender": "gender",
     "race": "ethnicity",
     "affected": "affected_vs_unaffected",
-    "stulberg": "Standardized Stulberg",   # optional; set weight to 0.0 to ignore
+    "stulberg": "stulberg_stage",        # <- your column name (used everywhere)
     "patient_id": "parsed_ID",
-    # RAW waldenstrom used for balancing & analysis
     "waldenstrom_raw": "waldenstrom_stage",
     "lateral_pillar": "lateral_pillar",
 }
 
 # =========================
-# Weights (updated per request)
+# Weights (objective)
 # =========================
 WEIGHTS = {
-    "size_penalty": 1.0,      # patients  test fraction deviation
-    "image_penalty": 1.0,     # images    test fraction deviation
-    "inst_penalty": 1.0,      # institutions test fraction deviation
+    "size_penalty": 1.0,
+    "image_penalty": 1.0,
+    "inst_penalty": 1.0,
     "age": 1.0,
-    "gender": 2.0,
+    "gender": 1.0,
     "race": 1.0,
     "affected": 1.0,
-    "waldenstrom_raw": 5.0,   # RAW Waldenström balanced on **image-level**
-    "stulberg": 0.0,          # set 0.0 to ignore
+    "waldenstrom_raw": 5.0,   # image-level balance
+    "stulberg": 1.0,          # patient-level (reporting)
 }
-
 DEFAULT_AGE_BINS = 10
-
 
 # ======================
 # Robust Excel I/O
 # ======================
+
 def safe_read_excel(path, sheet_name=None, try_copy=False):
     try:
         return pd.read_excel(path, sheet_name=sheet_name, engine="openpyxl")
@@ -91,10 +86,10 @@ def safe_read_excel(path, sheet_name=None, try_copy=False):
             finally:
                 pass
 
-
 # ======================
 # Helpers & standardizers
 # ======================
+
 def coalesce_column(df: pd.DataFrame, name: str):
     if name is None:
         return None
@@ -106,6 +101,7 @@ def coalesce_column(df: pd.DataFrame, name: str):
             return c
     raise KeyError(f"Column '{name}' not found. Available: {list(df.columns)}")
 
+
 def standardize_gender(x):
     if pd.isna(x): return "Unknown"
     s = str(x).strip().lower()
@@ -113,6 +109,7 @@ def standardize_gender(x):
     if s in {"f","female","woman"}: return "Female"
     if s in {"other","nonbinary","non-binary","nb"}: return "Other"
     return "Unknown"
+
 
 def standardize_race_ethnicity(x):
     if pd.isna(x): return "Unknown"
@@ -132,6 +129,7 @@ def standardize_race_ethnicity(x):
         if k in s: return v
     return str(x).strip().title()
 
+
 def standardize_affected_anyhip(x):
     if pd.isna(x): return "Unknown"
     s = str(x).strip().lower()
@@ -142,12 +140,9 @@ def standardize_affected_anyhip(x):
     except Exception:
         return "Affected" if s not in {"","unknown","na","none"} else "Unknown"
 
-def standardize_stage(x):
-    if pd.isna(x): return "Unknown"
-    return str(x).strip().title()
 
 def normalize_wald_raw(s: str):
-    """Normalize raw waldenstrom_stage -> IIa/IIb/IIIa/IIIb (robust to casing/spacing/numerals)."""
+    """Normalize raw waldenstrom_stage -> IIa/IIb/IIIa/IIIb."""
     if pd.isna(s): return None
     t = re.sub(r'[^ivxabcd0-9]', '', str(s).lower())
     t = t.replace('3','iii').replace('2','ii')
@@ -163,13 +158,34 @@ def normalize_wald_raw(s: str):
     return str(s).strip().title()
 
 
+def normalize_stulberg(val):
+    """
+    Normalize Stulberg -> Roman 'I'..'V'.
+    Accepts numbers 1..5, strings '1'..'5', 'I'..'V', with noise/spacing.
+    """
+    if pd.isna(val): return "Unknown"
+    s = str(val).strip().upper()
+    # numeric
+    try:
+        n = int(float(s))
+        if 1 <= n <= 5:
+            return ["","I","II","III","IV","V"][n]
+    except Exception:
+        pass
+    s = s.replace("STAGE", "").replace(" ", "")
+    s = s.replace("Ⅳ","IV").replace("Ⅴ","V")
+    if s in {"I","II","III","IV","V"}:
+        return s
+    return "Unknown"
+
 # ======================
 # Patient ID parsing & choosing rep image
 # ======================
 PATIENT_REGEXES = [
-    re.compile(r'(?i)\bpatient[_\-\s]*([a-z0-9]+)'),
+    re.compile(r'(?i)\bpatient[\_\-\s]*([a-z0-9]+)'),
     re.compile(r'(?i)\bpatient([0-9]+)'),
 ]
+
 def extract_patient_id_from_filename(fname: str):
     if pd.isna(fname): return None
     s = str(fname).strip()
@@ -178,28 +194,29 @@ def extract_patient_id_from_filename(fname: str):
         if m: return f"Patient_{m.group(1)}"
     low = s.lower()
     if "patient" in low:
-        toks = re.split(r'[_\-\s]+', s)
+        toks = re.split(r'[\_\-\s]+', s)
         for i,t in enumerate(toks):
             if t.lower().startswith("patient"):
                 return f"Patient_{toks[i+1]}" if i+1 < len(toks) else toks[i].title()
     return None
+
 
 def choose_representative_row(group_df: pd.DataFrame, file_col: str):
     """Prefer 'initial', then 'ap', else lexicographic filename."""
     def score(fn):
         low = str(fn).lower()
         s1 = 1 if "initial" in low else 0
-        s2 = 1 if re.search(r'(^|[_\-\s])ap([_\-\s]|$)', low) else (1 if "ap" in low else 0)
+        s2 = 1 if re.search(r'(^|[\_\-\s])ap([\_\-\s]|$)', low) else (1 if "ap" in low else 0)
         return (-s1, -s2, str(fn))
     if file_col not in group_df.columns:
         return group_df.iloc[[0]]
     order = sorted(range(len(group_df)), key=lambda i: score(group_df.iloc[i][file_col]))
     return group_df.iloc[[order[0]]]
 
-
 # ======================
 # Distributions math
 # ======================
+
 def make_age_bins(age_series: pd.Series, bin_count: int = DEFAULT_AGE_BINS):
     vals = pd.to_numeric(age_series, errors="coerce").dropna()
     if len(vals) == 0: return None
@@ -214,10 +231,12 @@ def make_age_bins(age_series: pd.Series, bin_count: int = DEFAULT_AGE_BINS):
     if mn == mx: return np.array([mn, mx + 1e-6], dtype=float)
     return np.linspace(mn, mx, bin_count + 1, dtype=float)
 
+
 def bin_age(values: np.ndarray, bins: np.ndarray):
     if bins is None or len(values) == 0: return np.zeros(0, dtype=int)
     counts, _ = np.histogram(values, bins=bins)
     return counts.astype(int)
+
 
 def l1_distance_from_arrays(p_counts: np.ndarray, q_counts: np.ndarray):
     p_total = p_counts.sum(); q_total = q_counts.sum()
@@ -226,10 +245,10 @@ def l1_distance_from_arrays(p_counts: np.ndarray, q_counts: np.ndarray):
     q = (q_counts / q_total) if q_total > 0 else np.zeros_like(q_counts, dtype=float)
     return float(np.abs(p - q).sum())
 
+# ======================
+# Deduplicate to one row per patient
+# ======================
 
-# ======================
-# Deduplicate to one row per patient (rep image per patient)
-# ======================
 def dedupe_to_patients(df: pd.DataFrame, cols: dict, patient_id_col: str = None):
     work = df.copy()
     if patient_id_col:
@@ -253,7 +272,7 @@ def dedupe_to_patients(df: pd.DataFrame, cols: dict, patient_id_col: str = None)
             "PatientID": pid,
             "n_rows": len(g),
             "chosen_file_name": rep.iloc[0][cols.get("file_name", "file_name")] if cols.get("file_name") in rep.columns else None,
-            "institutions_in_group": "|".join(map(str, insts)) if insts else "",
+            "institutions_in_group": "\n".join(map(str, insts)) if insts else "",
             "institution_conflict": len(insts) > 1
         })
         reps.append(rep)
@@ -282,8 +301,9 @@ def dedupe_to_patients(df: pd.DataFrame, cols: dict, patient_id_col: str = None)
     if cols.get("affected") in patients_df.columns:
         patients_df[cols["affected"]] = patients_df[cols["affected"]].apply(standardize_affected_anyhip)
 
+    # Patient-level Stulberg (normalize to I..V)
     if cols.get("stulberg") in patients_df.columns:
-        patients_df[cols["stulberg"]] = patients_df[cols["stulberg"]].apply(standardize_stage)
+        patients_df[cols["stulberg"]] = patients_df[cols["stulberg"]].apply(normalize_stulberg)
 
     # RAW waldenström (patient table kept for reporting; balancing uses IMAGE-level later)
     raw_col = cols.get("waldenstrom_raw", DEFAULT_COLS["waldenstrom_raw"])
@@ -299,37 +319,17 @@ def dedupe_to_patients(df: pd.DataFrame, cols: dict, patient_id_col: str = None)
 
     return patients_df, audit_df
 
+# ======================
+# Precompute per-institution stats (patient-level + image-level WR)
+# ======================
 
-# ======================
-# Precompute per-institution stats
-# (PATIENT-level for age/gender/race/affected/stulberg; IMAGE-level for waldenström RAW)
-# ======================
 def build_category_index(series: pd.Series):
     cats = sorted(series.dropna().unique().tolist())
     index = {c: i for i, c in enumerate(cats)}
     return cats, index
 
+
 def precompute_inst_stats(patients_df: pd.DataFrame, df_all: pd.DataFrame, cols: dict, age_bins: np.ndarray):
-    """
-    Returns:
-      inst_list, inst_stats, totals, cat_meta, age_bins_edges
-
-    inst_stats[inst]:
-      {
-        # patient-level fields
-        "n": <patients>, "age": np.ndarray or None,
-        "gender": np.ndarray or None,
-        "race": np.ndarray or None,
-        "affected": np.ndarray or None,
-        "stulberg": np.ndarray or None,
-
-        # image-level fields
-        "n_images": <images>,
-        "waldenstrom_raw": np.ndarray or None  (IMAGE-LEVEL)
-      }
-    totals[...] summed likewise (note: waldenstrom_raw totals are IMAGE-LEVEL)
-    """
-
     inst_col = cols["institution"]
 
     # IMAGE-level normalized Waldenström for df_all
@@ -341,17 +341,22 @@ def precompute_inst_stats(patients_df: pd.DataFrame, df_all: pd.DataFrame, cols:
         df_all = df_all.copy()
         df_all["__wald_raw_norm_img__"] = np.nan
 
-    # Category metadata:
-    # - patient-level categories for gender/race/affected/stulberg
-    # - image-level categories for waldenstrom_raw
+    # Patient-level categories (including Stulberg). Exclude 'Unknown' for Stulberg.
     cat_meta = {}
-
-    # Patient-level categories
     for var in ["gender","race","affected","stulberg"]:
         col = cols.get(var)
         if col in patients_df.columns:
-            cats, idx = build_category_index(patients_df[col])
-            cat_meta[var] = {"cats": cats, "idx": idx}
+            ser = patients_df[col]
+            if var == "stulberg":
+                ser = ser.astype(str)
+                ser = ser[(ser.notna()) & (ser.str.upper() != "UNKNOWN")]
+            else:
+                ser = ser.dropna()
+            if len(ser) > 0:
+                cats, idx = build_category_index(ser)
+                cat_meta[var] = {"cats": cats, "idx": idx}
+            else:
+                cat_meta[var] = None
         else:
             cat_meta[var] = None
 
@@ -359,9 +364,9 @@ def precompute_inst_stats(patients_df: pd.DataFrame, df_all: pd.DataFrame, cols:
     cats_w, idx_w = build_category_index(df_all["__wald_raw_norm_img__"])
     cat_meta["waldenstrom_raw"] = {"cats": cats_w, "idx": idx_w} if len(cats_w) > 0 else None
 
-    # Institution list (union of any presence)
+    # Institutions
     inst_from_pat = set(patients_df[inst_col].dropna().unique()) if inst_col in patients_df.columns else set()
-    inst_from_img = set(df_all[inst_col].dropna().unique())      if inst_col in df_all.columns else set()
+    inst_from_img = set(df_all[inst_col].dropna().unique()) if inst_col in df_all.columns else set()
     inst_list = sorted(inst_from_pat.union(inst_from_img))
 
     # Age bins
@@ -374,7 +379,7 @@ def precompute_inst_stats(patients_df: pd.DataFrame, df_all: pd.DataFrame, cols:
         "n_images": 0,
         "age": np.zeros(age_num_bins, dtype=int) if age_num_bins > 0 else None,
         "gender": None, "race": None, "affected": None, "stulberg": None,
-        "waldenstrom_raw": None,  # IMAGE-level totals
+        "waldenstrom_raw": None,  # IMAGE-level
     }
     for var in ["gender","race","affected","stulberg"]:
         if cat_meta[var] is not None:
@@ -382,21 +387,18 @@ def precompute_inst_stats(patients_df: pd.DataFrame, df_all: pd.DataFrame, cols:
     if cat_meta["waldenstrom_raw"] is not None:
         totals["waldenstrom_raw"] = np.zeros(len(cat_meta["waldenstrom_raw"]["cats"]), dtype=int)
 
-    # Pre-group
+    # Pre-group by institution
     g_pat_by_inst = {inst: g for inst, g in patients_df.groupby(inst_col)} if inst_col in patients_df.columns else {}
-    g_img_by_inst = {inst: g for inst, g in df_all.groupby(inst_col)}      if inst_col in df_all.columns else {}
+    g_img_by_inst = {inst: g for inst, g in df_all.groupby(inst_col)} if inst_col in df_all.columns else {}
 
     inst_stats = {}
-
     for inst in inst_list:
         g_pat = g_pat_by_inst.get(inst)
         g_img = g_img_by_inst.get(inst)
 
-        # Counts
         n_pat = len(g_pat) if g_pat is not None else 0
         n_img = len(g_img) if g_img is not None else 0
 
-        # Age histogram
         if age_bins_edges is not None and g_pat is not None and cols.get("age") in g_pat.columns:
             ages = pd.to_numeric(g_pat[cols["age"]], errors="coerce").dropna().values
             age_hist = bin_age(ages, age_bins_edges)
@@ -438,10 +440,8 @@ def precompute_inst_stats(patients_df: pd.DataFrame, df_all: pd.DataFrame, cols:
                     counts_w[meta_w["idx"][v]] += 1
             entry["waldenstrom_raw"] = counts_w
 
-        # Save inst
         inst_stats[inst] = entry
 
-        # Update totals
         totals["n"] += n_pat
         totals["n_images"] += n_img
         if age_hist is not None:
@@ -458,22 +458,20 @@ def precompute_inst_stats(patients_df: pd.DataFrame, df_all: pd.DataFrame, cols:
 
     return inst_list, inst_stats, totals, cat_meta, age_bins_edges
 
-
 # ======================
 # Split state & scoring
 # ======================
+
 class SplitState:
     def __init__(self, inst_list, inst_stats, totals, cat_meta, age_bins_edges):
         self.test_set = set()
         self.n_total_patients = int(totals["n"])
-        self.n_total_images   = int(totals["n_images"])
-        self.n_total_insts    = len(inst_list)
+        self.n_total_images = int(totals["n_images"])
+        self.n_total_insts = len(inst_list)
         self.cat_meta = cat_meta
         self.age_bins_edges = age_bins_edges
         self.inst_stats = inst_stats
         self.totals = totals
-
-        # Aggregates for Test
         self.test_n = 0
         self.test_n_images = 0
         self.test_age = np.zeros_like(totals["age"]) if totals["age"] is not None else None
@@ -510,8 +508,8 @@ class SplitState:
         c = SplitState.__new__(SplitState)
         c.test_set = set(self.test_set)
         c.n_total_patients = self.n_total_patients
-        c.n_total_images   = self.n_total_images
-        c.n_total_insts    = self.n_total_insts
+        c.n_total_images = self.n_total_images
+        c.n_total_insts = self.n_total_insts
         c.cat_meta = self.cat_meta
         c.age_bins_edges = self.age_bins_edges
         c.inst_stats = self.inst_stats
@@ -524,19 +522,16 @@ class SplitState:
 
 
 def score_state(state: SplitState, weights, target_test_frac_pat, target_test_inst_frac, target_test_img_frac):
-    # size deviations
     test_frac_pat = state.test_n / state.n_total_patients if state.n_total_patients > 0 else 0.0
-    test_frac_img = state.test_n_images / state.n_total_images   if state.n_total_images   > 0 else 0.0
-    test_frac_inst = len(state.test_set) / state.n_total_insts   if state.n_total_insts    > 0 else 0.0
+    test_frac_img = state.test_n_images / state.n_total_images if state.n_total_images > 0 else 0.0
+    test_frac_inst = len(state.test_set) / state.n_total_insts if state.n_total_insts > 0 else 0.0
     size_dev_pat = abs(test_frac_pat - target_test_frac_pat)
     size_dev_img = abs(test_frac_img - target_test_img_frac)
-    inst_dev     = abs(test_frac_inst - target_test_inst_frac)
+    inst_dev = abs(test_frac_inst - target_test_inst_frac)
 
-    # L1 over distributions
     dist_score = 0.0
     per_dim = {}
 
-    # age (patient-level)
     if state.test_age is not None and state.totals["age"] is not None:
         train_age = state.totals["age"] - state.test_age
         d = l1_distance_from_arrays(train_age, state.test_age)
@@ -544,7 +539,6 @@ def score_state(state: SplitState, weights, target_test_frac_pat, target_test_in
     else:
         per_dim["age"] = 0.0
 
-    # patient-level categoricals
     for var in ["gender","race","affected","stulberg"]:
         test_arr = state.test_counts[var]; tot_arr = state.totals[var]
         if test_arr is None or tot_arr is None:
@@ -553,7 +547,6 @@ def score_state(state: SplitState, weights, target_test_frac_pat, target_test_in
         d = l1_distance_from_arrays(train_arr, test_arr)
         per_dim[var] = d; dist_score += weights.get(var,1.0) * d
 
-    # IMAGE-level waldenström
     test_arr = state.test_counts["waldenstrom_raw"]; tot_arr = state.totals["waldenstrom_raw"]
     if test_arr is None or tot_arr is None:
         per_dim["waldenstrom_raw"] = 0.0
@@ -563,12 +556,11 @@ def score_state(state: SplitState, weights, target_test_frac_pat, target_test_in
         per_dim["waldenstrom_raw"] = d; dist_score += weights.get("waldenstrom_raw",1.0) * d
 
     total_score = (
-        weights["size_penalty"]  * size_dev_pat +
+        weights["size_penalty"] * size_dev_pat +
         weights["image_penalty"] * size_dev_img +
-        weights["inst_penalty"]  * inst_dev +
+        weights["inst_penalty"] * inst_dev +
         dist_score
     )
-
     metrics = {
         "total_score": total_score,
         "size_deviation_patients": size_dev_pat,
@@ -587,22 +579,21 @@ def score_state(state: SplitState, weights, target_test_frac_pat, target_test_in
     }
     return total_score, metrics
 
-
 # ======================
 # Search
 # ======================
+
 def initial_greedy(inst_list, state: SplitState, target_test_frac, size_tol,
                    weights, target_test_inst_frac, target_test_img_frac, rand):
     best_score, _ = score_state(state, weights, target_test_frac, target_test_inst_frac, target_test_img_frac)
     remain = inst_list.copy(); rand.shuffle(remain)
-
     improved = True
     while improved:
         improved = False; best_delta = 0.0; best_choice = None
         for inst in remain:
             s2 = state.copy(); s2.add_inst(inst)
-            frac_pat = s2.test_n        / s2.n_total_patients if s2.n_total_patients > 0 else 0.0
-            frac_img = s2.test_n_images / s2.n_total_images   if s2.n_total_images   > 0 else 0.0
+            frac_pat = s2.test_n / s2.n_total_patients if s2.n_total_patients > 0 else 0.0
+            frac_img = s2.test_n_images / s2.n_total_images if s2.n_total_images > 0 else 0.0
             if (frac_pat > target_test_frac + size_tol) or (frac_img > target_test_img_frac + size_tol):
                 continue
             sc, _ = score_state(s2, weights, target_test_frac, target_test_inst_frac, target_test_img_frac)
@@ -616,23 +607,21 @@ def initial_greedy(inst_list, state: SplitState, target_test_frac, size_tol,
             improved = True
     return state
 
+
 def local_search_refine(inst_list, state: SplitState, target_test_frac, size_tol,
                         weights, target_test_inst_frac, target_test_img_frac,
                         rand, max_iters=80, swap_samples=80):
     best_state = state.copy()
     best_score, _ = score_state(best_state, weights, target_test_frac, target_test_inst_frac, target_test_img_frac)
-
     for _ in range(max_iters):
         improved = False
-
-        # single flips
         cand_order = inst_list.copy(); rand.shuffle(cand_order)
         for inst in cand_order:
             s2 = best_state.copy()
             if inst in s2.test_set: s2.remove_inst(inst)
             else: s2.add_inst(inst)
-            frac_pat = s2.test_n        / s2.n_total_patients if s2.n_total_patients > 0 else 0.0
-            frac_img = s2.test_n_images / s2.n_total_images   if s2.n_total_images   > 0 else 0.0
+            frac_pat = s2.test_n / s2.n_total_patients if s2.n_total_patients > 0 else 0.0
+            frac_img = s2.test_n_images / s2.n_total_images if s2.n_total_images > 0 else 0.0
             if (abs(frac_pat - target_test_frac) > size_tol*2.0) or (abs(frac_img - target_test_img_frac) > size_tol*2.0):
                 continue
             sc, _ = score_state(s2, weights, target_test_frac, target_test_inst_frac, target_test_img_frac)
@@ -640,25 +629,22 @@ def local_search_refine(inst_list, state: SplitState, target_test_frac, size_tol
                 best_state = s2; best_score = sc; improved = True; break
         if improved: continue
 
-        # random swaps
         test_list = list(best_state.test_set)
         train_list = [i for i in inst_list if i not in best_state.test_set]
         if not test_list or not train_list: break
-
         for _ in range(swap_samples):
             a = rand.choice(test_list); b = rand.choice(train_list)
             s2 = best_state.copy(); s2.remove_inst(a); s2.add_inst(b)
-            frac_pat = s2.test_n        / s2.n_total_patients if s2.n_total_patients > 0 else 0.0
-            frac_img = s2.test_n_images / s2.n_total_images   if s2.n_total_images   > 0 else 0.0
+            frac_pat = s2.test_n / s2.n_total_patients if s2.n_total_patients > 0 else 0.0
+            frac_img = s2.test_n_images / s2.n_total_images if s2.n_total_images > 0 else 0.0
             if (abs(frac_pat - target_test_frac) > size_tol*2.0) or (abs(frac_img - target_test_img_frac) > size_tol*2.0):
                 continue
             sc, _ = score_state(s2, weights, target_test_frac, target_test_inst_frac, target_test_img_frac)
             if sc + 1e-12 < best_score:
                 best_state = s2; best_score = sc; improved = True; break
-
         if not improved: break
-
     return best_state, best_score
+
 
 def multi_start_search(inst_list, inst_stats, totals, cat_meta, age_bins_edges,
                        target_test_frac, size_tol, target_test_inst_frac, target_test_img_frac, weights,
@@ -675,10 +661,10 @@ def multi_start_search(inst_list, inst_stats, totals, cat_meta, age_bins_edges,
             best_state, best_score, best_metrics = refined, score, metrics
     return best_state, best_score, best_metrics
 
-
 # ======================
 # Reporting helpers
 # ======================
+
 def per_institution_summary_from_arrays(inst_list, inst_stats, cat_meta):
     rows = []
     for inst in inst_list:
@@ -691,10 +677,15 @@ def per_institution_summary_from_arrays(inst_list, inst_stats, cat_meta):
             meta = cat_meta[var]; arr = s[var]
             if meta is None or arr is None: continue
             total = s["n"] if (var != "waldenstrom_raw") else max(s["n_images"], 1)
+            if var == "stulberg":
+                # Use known-only denominator for Stulberg
+                known_total = int(arr.sum())
+                total = known_total if known_total > 0 else 1
             for cat, idx in meta["idx"].items():
                 row[f"{prefix}:{cat}"] = arr[idx] / total
         rows.append(row)
     return pd.DataFrame(rows).sort_values("n_patients", ascending=False)
+
 
 def series_from_counts(arr, cats):
     if arr is None or cats is None:
@@ -703,6 +694,7 @@ def series_from_counts(arr, cats):
     if total == 0:
         return pd.Series([0.0]*len(cats), index=cats)
     return pd.Series(arr / total, index=cats)
+
 
 def plot_compare_bars_from_arrays(train_arr, test_arr, cats, title, out_path):
     tr = series_from_counts(train_arr, cats); te = series_from_counts(test_arr, cats)
@@ -716,17 +708,19 @@ def plot_compare_bars_from_arrays(train_arr, test_arr, cats, title, out_path):
     plt.ylim(0, ymax*1.2); plt.legend(); plt.tight_layout()
     plt.savefig(out_path, dpi=200); plt.close()
 
+
 def format_age_bin_labels(bins):
     labels = []
     for i in range(len(bins)-1):
         a,b = bins[i], bins[i+1]
         labels.append(f"[{a:.2f}, {b:.2f})" if i < len(bins)-2 else f"[{a:.2f}, {b:.2f}]")
+    # fixed: return after loop
     return labels
-
 
 # ======================
 # Main
 # ======================
+
 def main():
     ap = argparse.ArgumentParser(description="Institutional 80/20 split (patients & images) with RAW Waldenström balanced at image-level.")
     ap.add_argument("--input", required=True, help="Path to Excel (.xlsx)")
@@ -734,10 +728,10 @@ def main():
     ap.add_argument("--output", required=True, help="Output directory")
 
     # Targets & search
-    ap.add_argument("--target-test-frac",      type=float, default=0.20, help="Target fraction of PATIENTS in test")
-    ap.add_argument("--target-test-img-frac",  type=float, default=0.20, help="Target fraction of IMAGES in test")
-    ap.add_argument("--target-test-inst-frac", type=float, default=0.20, help="Target fraction of INSTITUTIONS in test")
-    ap.add_argument("--size-tol", type=float, default=0.02, help="Tolerance on test fractions during search")
+    ap.add_argument("--target-test-frac", type=float, default=0.20)
+    ap.add_argument("--target-test-img-frac", type=float, default=0.20)
+    ap.add_argument("--target-test-inst-frac", type=float, default=0.20)
+    ap.add_argument("--size-tol", type=float, default=0.02)
     ap.add_argument("--random-seed", type=int, default=42)
     ap.add_argument("--starts", type=int, default=20)
     ap.add_argument("--max-iters", type=int, default=80)
@@ -745,29 +739,26 @@ def main():
 
     # Columns
     ap.add_argument("--patient-id-column", default=DEFAULT_COLS["patient_id"])
-    ap.add_argument("--file-name-column",  default=DEFAULT_COLS["file_name"])
-    ap.add_argument("--institution-column",default=DEFAULT_COLS["institution"])
-    ap.add_argument("--age-column",        default=DEFAULT_COLS["age"])
-    ap.add_argument("--gender-column",     default=DEFAULT_COLS["gender"])
-    ap.add_argument("--race-column",       default=DEFAULT_COLS["race"])
-    ap.add_argument("--affected-column",   default=DEFAULT_COLS["affected"])
-    ap.add_argument("--stulberg-column",   default=DEFAULT_COLS["stulberg"])
+    ap.add_argument("--file-name-column", default=DEFAULT_COLS["file_name"])
+    ap.add_argument("--institution-column", default=DEFAULT_COLS["institution"])
+    ap.add_argument("--age-column", default=DEFAULT_COLS["age"])
+    ap.add_argument("--gender-column", default=DEFAULT_COLS["gender"])
+    ap.add_argument("--race-column", default=DEFAULT_COLS["race"])
+    ap.add_argument("--affected-column", default=DEFAULT_COLS["affected"])
+    ap.add_argument("--stulberg-column", default=DEFAULT_COLS["stulberg"])
     ap.add_argument("--waldenstrom-raw-column", default=DEFAULT_COLS["waldenstrom_raw"])
-    ap.add_argument("--lateral-pillar-column",  default=DEFAULT_COLS["lateral_pillar"])
-    ap.add_argument("--wald-subset-stages", default="IIb,IIIa",
-                    help="Comma-separated raw waldenstrom stages to subset on (e.g., 'IIb,IIIa')")
+    ap.add_argument("--lateral-pillar-column", default=DEFAULT_COLS["lateral_pillar"])
 
-    # OneDrive locks
-    ap.add_argument("--copy-locked-input", type=str, default="false", help="If 'true', copy locked Excel to temp and read it")
+    # Subset: default now IIb + IIa (as requested)
+    ap.add_argument("--wald-subset-stages", default="IIb,IIa",
+                    help="Comma-separated raw waldenstrom stages to subset on (e.g., 'IIb,IIa')")
 
-    # Deprecated alias for standardized flag (maps to raw)
-    ap.add_argument("--waldenstrom-column", dest="deprecated_wald_std", default=None,
-                    help="(Deprecated) standardized Waldenström column. Use --waldenstrom-raw-column instead.")
+    ap.add_argument("--copy-locked-input", type=str, default="false")
+    ap.add_argument("--waldenstrom-column", dest="deprecated_wald_std", default=None)  # deprecated
 
     args = ap.parse_args()
     os.makedirs(args.output, exist_ok=True)
 
-    # Backward-compat
     if getattr(args, "deprecated_wald_std", None) and not getattr(args, "waldenstrom_raw_column", None):
         args.waldenstrom_raw_column = args.deprecated_wald_std
         print("[WARN] --waldenstrom-column is deprecated; using --waldenstrom-raw-column instead.")
@@ -778,8 +769,8 @@ def main():
         df_all = safe_read_excel(args.input, sheet_name=args.sheet, try_copy=copy_locked)
     else:
         df_all = safe_read_excel(args.input, sheet_name=None, try_copy=copy_locked)
-        if isinstance(df_all, dict):
-            df_all = df_all[next(iter(df_all))]
+    if isinstance(df_all, dict):
+        df_all = df_all[next(iter(df_all))]
     df_all.columns = [str(c).strip() for c in df_all.columns]
 
     # Resolve columns (case-insensitive)
@@ -787,19 +778,22 @@ def main():
     def bind(name, val):
         try:
             cols[name] = coalesce_column(df_all, val) if val is not None else None
+            if name == "stulberg" and cols[name] is not None:
+                print(f"[BIND] Using Stulberg column: '{cols[name]}'")
         except KeyError as e:
             print(f"Notice: {e}"); cols[name] = None
+
     bind("institution", args.institution_column)
     bind("file_name", args.file_name_column)
     bind("age", args.age_column)
     bind("gender", args.gender_column)
     bind("race", args.race_column)
     bind("affected", args.affected_column)
-    bind("stulberg", args.stulberg_column)
+    bind("stulberg", args.stulberg_column)  # stulberg_stage everywhere
     bind("waldenstrom_raw", args.waldenstrom_raw_column)
     bind("lateral_pillar", args.lateral_pillar_column)
 
-    # Deduplicate -> patient table (for patient-level fields)
+    # Deduplicate -> patient table
     patients_df, audit_df = dedupe_to_patients(df_all, cols, patient_id_col=args.patient_id_column)
     total_patients = len(patients_df)
     print(f"Total unique patients: {total_patients}")
@@ -812,8 +806,9 @@ def main():
     print(f"Found {len(inst_list)} institutions. Total images: {totals['n_images']}")
 
     # Summary per institution
-    inst_summary = per_institution_summary_from_arrays(inst_list, inst_stats, cat_meta)
-    inst_summary.to_csv(os.path.join(args.output, "institution_summary_patients.csv"), index=False)
+    per_institution_summary_from_arrays(inst_list, inst_stats, cat_meta).to_csv(
+        os.path.join(args.output, "institution_summary_patients.csv"), index=False
+    )
     audit_df.to_csv(os.path.join(args.output, "patient_dedupe_audit.csv"), index=False)
 
     # Search best split
@@ -845,7 +840,7 @@ def main():
     assign_df = pd.DataFrame(assign_rows).sort_values(["split","n_patients"], ascending=[True,False])
     assign_df.to_csv(os.path.join(args.output, "split_assignment_institutions.csv"), index=False)
 
-    # Plots
+    # Plots dir
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     plots_dir = os.path.join(args.output, f"plots_{ts}"); os.makedirs(plots_dir, exist_ok=True)
 
@@ -862,7 +857,7 @@ def main():
         ("gender","Gender"),
         ("race","Ethnicity"),
         ("affected","Affected vs Unaffected"),
-        ("stulberg","Stulberg Stage"),
+        ("stulberg","Stulberg Stage"),                          # <- patient-level Stulberg from stulberg_stage
         ("waldenstrom_raw","Waldenström Stage (Raw, Image-level)"),
     ]:
         meta = cat_meta[var]
@@ -879,16 +874,14 @@ def main():
     # ==============================
     raw_out_csv = os.path.join(args.output, "waldenstrom_stage_raw_split_distribution.csv")
     raw_chi2 = {"stat": None, "p": None, "note": ""}
-    df_all = df_all.copy()
-    df_all["__wald_raw_norm_img__"] = df_all[cols["waldenstrom_raw"]].apply(normalize_wald_raw) if cols.get("waldenstrom_raw") in df_all.columns else np.nan
-    df_all["__split__"] = df_all[cols["institution"]].apply(lambda x: "Test" if x in test_insts else "Train/Val")
-
-    wr_tr = df_all.loc[df_all["__split__"]=="Train/Val", "__wald_raw_norm_img__"].value_counts().sort_index()
-    wr_te = df_all.loc[df_all["__split__"]=="Test",      "__wald_raw_norm_img__"].value_counts().sort_index()
+    df_all_wr = df_all.copy()
+    df_all_wr["__split__"] = df_all_wr[cols["institution"]].apply(lambda x: "Test" if x in test_insts else "Train/Val")
+    df_all_wr["__wald_raw_norm_img__"] = df_all_wr[cols["waldenstrom_raw"]].apply(normalize_wald_raw) if cols.get("waldenstrom_raw") in df_all_wr.columns else np.nan
+    wr_tr = df_all_wr.loc[df_all_wr["__split__"]=="Train/Val", "__wald_raw_norm_img__"].value_counts().sort_index()
+    wr_te = df_all_wr.loc[df_all_wr["__split__"]=="Test", "__wald_raw_norm_img__"].value_counts().sort_index()
     cats_wr = sorted(set(wr_tr.index).union(set(wr_te.index)))
     tr = pd.Series(0, index=cats_wr); tr.update(wr_tr)
     te = pd.Series(0, index=cats_wr); te.update(wr_te)
-
     rows = []
     for label, arr in [("Train/Val", tr), ("Test", te)]:
         T = arr.sum() if arr.sum()>0 else 1
@@ -896,7 +889,6 @@ def main():
             rows.append({"split": label, "waldenstrom_stage_raw (images)": cat, "count": int(arr[cat]), "prop": float(arr[cat]/T)})
     pd.DataFrame(rows).to_csv(raw_out_csv, index=False)
 
-    # Chi-square (image-level)
     if SCIPY_AVAILABLE and len(cats_wr)>0:
         table = np.vstack([tr.reindex(cats_wr).values, te.reindex(cats_wr).values])
         try:
@@ -906,78 +898,108 @@ def main():
             raw_chi2 = {"stat": None, "p": None, "note": "Chi-square failed (sparse)"}
 
     # ==============================
-    # IIb/IIIa subset — PATIENT LEVEL (include ALL IIb/IIIa; LP kept, not filtered)
+    # Stulberg split analysis — IMAGE LEVEL (I..V) — exclude 'Unknown'
     # ==============================
-    subset_csv  = os.path.join(args.output, "subset_Wald_IIb_IIIa_lateral_pillar_by_split.csv")
-    subset_plot = os.path.join(plots_dir, "subset_wald_IIb_IIIa_lateral_pillar.png")
-    subset_stats = {"chi2": {"stat": None, "p": None, "note": ""}, "n_train": 0, "n_test": 0}
+    stul_img_csv = os.path.join(args.output, "stulberg_stage_images_split_distribution.csv")
+    stul_img_chi2 = {"stat": None, "p": None, "note": ""}
+    df_all_st = df_all.copy()
+    df_all_st["__split__"] = df_all_st[cols["institution"]].apply(lambda x: "Test" if x in test_insts else "Train/Val")
+    df_stul_img = pd.DataFrame()
+    if cols.get("stulberg") in df_all_st.columns:
+        df_all_st["__stulberg_img_norm__"] = df_all_st[cols["stulberg"]].apply(normalize_stulberg)
+        mask_known_st = df_all_st["__stulberg_img_norm__"] != "Unknown"
+        st_tr = df_all_st.loc[(df_all_st["__split__"]=="Train/Val") & mask_known_st, "__stulberg_img_norm__"].value_counts().sort_index()
+        st_te = df_all_st.loc[(df_all_st["__split__"]=="Test") & mask_known_st, "__stulberg_img_norm__"].value_counts().sort_index()
+        cats_st = sorted(set(st_tr.index).union(set(st_te.index)))
+        tr_s = pd.Series(0, index=cats_st); tr_s.update(st_tr)
+        te_s = pd.Series(0, index=cats_st); te_s.update(st_te)
 
+        # CSV + DataFrame to use in Excel
+        srows = []
+        for label, arr in [("Train/Val", tr_s), ("Test", te_s)]:
+            T = arr.sum() if arr.sum()>0 else 1
+            for cat in cats_st:
+                srows.append({"split": label, "stulberg_stage (images)": cat, "count": int(arr[cat]), "prop": float(arr[cat]/T)})
+        df_stul_img = pd.DataFrame(srows)
+        df_stul_img.to_csv(stul_img_csv, index=False)
+
+        # χ²
+        if SCIPY_AVAILABLE and len(cats_st)>0:
+            table = np.vstack([tr_s.reindex(cats_st).values, te_s.reindex(cats_st).values])
+            try:
+                stat, p, _, _ = chi2_contingency(table)
+                stul_img_chi2 = {"stat": float(stat), "p": float(p), "note": ""}
+            except Exception:
+                stul_img_chi2 = {"stat": None, "p": None, "note": "Chi-square failed (sparse)"}
+
+        # Plot
+        plot_compare_bars_from_arrays(tr_s.values, te_s.values, cats_st,
+                                      "Stulberg Stage (I–V) — Image Level (Train/Val vs Test)",
+                                      os.path.join(plots_dir, "stulberg_images.png"))
+
+    # ==============================
+    # Subset — IIb & IIa (no LP requirement); report patients & radiographs
+    # ==============================
     subset_targets = [t.strip() for t in str(args.wald_subset_stages).split(",") if t.strip()]
     subset_targets_norm = set([normalize_wald_raw(t) for t in subset_targets])
 
+    # PATIENT-level subset
     wrn_pat = patients_df["waldenstrom_raw_norm"] if "waldenstrom_raw_norm" in patients_df.columns else pd.Series(index=patients_df.index, dtype=object)
-    # lateral pillar normalize; missing -> 'Not Reported'
+    is_test_pat = patients_split_df["split"].values == "Test"
+    mask_split_pat = pd.Series(is_test_pat, index=patients_df.index)
+    subset_mask_pat = wrn_pat.notna() & wrn_pat.isin(subset_targets_norm)
+    subset_pat_df = pd.DataFrame({
+        "PatientID": patients_df.loc[subset_mask_pat, "PatientID"],
+        "waldenstrom_raw_norm": wrn_pat.loc[subset_mask_pat],
+        "split": np.where(mask_split_pat.loc[subset_mask_pat], "Test", "Train/Val")
+    })
+    # counts
+    pat_counts = subset_pat_df["split"].value_counts()
+    n_pat_train = int(pat_counts.get("Train/Val", 0))
+    n_pat_test  = int(pat_counts.get("Test", 0))
+
+    # IMAGE-level subset (radiographs)
+    df_all_sub = df_all_wr.copy()
+    mask_img = df_all_sub["__wald_raw_norm_img__"].notna() & df_all_sub["__wald_raw_norm_img__"].isin(subset_targets_norm)
+    sub_img = df_all_sub.loc[mask_img, ["__split__","__wald_raw_norm_img__"]]
+    img_counts = sub_img["__split__"].value_counts()
+    n_img_train = int(img_counts.get("Train/Val", 0))
+    n_img_test  = int(img_counts.get("Test", 0))
+
+    # LP (optional info; not required for inclusion)
     lp_col = cols.get("lateral_pillar")
     if lp_col in patients_df.columns:
-        lat_raw = patients_df[lp_col].astype(str).str.strip().replace({"":"nan"})
-        lat_norm = lat_raw.replace({"nan": np.nan, "NaN": np.nan}).str.title().fillna("Not Reported")
+        lp_raw = patients_df.loc[subset_mask_pat, lp_col].astype(str).str.strip().replace({"": "nan"})
+        lp_norm = lp_raw.replace({"nan": np.nan, "NaN": np.nan}).str.title().fillna("Not Reported")
+        subset_pat_df["lateral_pillar_norm"] = lp_norm.values
     else:
-        lat_norm = pd.Series("Not Reported", index=patients_df.index)
+        subset_pat_df["lateral_pillar_norm"] = "Not Reported"
 
-    is_test = patients_split_df["split"].values == "Test"
-    mask_split = pd.Series(is_test, index=patients_df.index)
-
-    subset_mask = wrn_pat.notna() & wrn_pat.isin(subset_targets_norm)   # <-- no LP filter
-    subset_df = pd.DataFrame({
-        "PatientID": patients_df.loc[subset_mask, "PatientID"],
-        "waldenstrom_raw_norm": wrn_pat.loc[subset_mask],
-        "lateral_pillar_norm": lat_norm.loc[subset_mask],
-        "split": np.where(mask_split.loc[subset_mask], "Test", "Train/Val")
-    })
-
-    subset_stats["n_train"] = int((subset_df["split"]=="Train/Val").sum())
-    subset_stats["n_test"]  = int((subset_df["split"]=="Test").sum())
-
-    tr_lp = subset_df.loc[subset_df["split"]=="Train/Val", "lateral_pillar_norm"].value_counts().sort_index()
-    te_lp = subset_df.loc[subset_df["split"]=="Test",      "lateral_pillar_norm"].value_counts().sort_index()
+    # Optional LP distribution by split (patient-level, for reference)
+    tr_lp = subset_pat_df.loc[subset_pat_df["split"]=="Train/Val", "lateral_pillar_norm"].value_counts().sort_index()
+    te_lp = subset_pat_df.loc[subset_pat_df["split"]=="Test", "lateral_pillar_norm"].value_counts().sort_index()
     cats_lp = sorted(set(tr_lp.index).union(set(te_lp.index)))
     tr2 = pd.Series(0, index=cats_lp); tr2.update(tr_lp)
     te2 = pd.Series(0, index=cats_lp); te2.update(te_lp)
 
-    # CSV for subset
-    rows_out = []
-    for label, arr in [("Train/Val", tr2), ("Test", te2)]:
-        T = int(arr.sum()) if arr.sum()>0 else 1
-        for cat in cats_lp:
-            rows_out.append({"split": label,
-                             "waldenstrom_raw_subset": ",".join(sorted(subset_targets_norm)),
-                             "lateral_pillar": cat,
-                             "count": int(arr[cat]),
-                             "prop": float(arr[cat]/T)})
-    pd.DataFrame(rows_out).to_csv(subset_csv, index=False)
-
-    # Chi-square for LP distribution in subset
+    # χ² on LP distribution (optional/informational)
+    subset_lp_chi2 = {"stat": None, "p": None, "note": ""}
     if SCIPY_AVAILABLE and len(cats_lp)>0:
         table = np.vstack([tr2.reindex(cats_lp).values, te2.reindex(cats_lp).values])
         try:
             stat, p, _, _ = chi2_contingency(table)
-            subset_stats["chi2"] = {"stat": float(stat), "p": float(p), "note": ""}
+            subset_lp_chi2 = {"stat": float(stat), "p": float(p), "note": ""}
         except Exception:
-            subset_stats["chi2"] = {"stat": None, "p": None, "note": "Chi-square failed (sparse data)"}
-
-    print(f"Saved plots to: {plots_dir}")
+            subset_lp_chi2 = {"stat": None, "p": None, "note": "Chi-square failed (sparse data)"}
 
     # ==============================
-    # 02_stats_tests — REINSTATED
+    # 02_stats_tests
     # ==============================
     stats_tests = {}
-
     # Patient-level AGE KS
     if cols.get("age") in patients_df.columns:
-        is_test_pat = patients_split_df["split"].values == "Test"
-        mask_pat = pd.Series(is_test_pat, index=patients_df.index)
-        tr_age = patients_df.loc[~mask_pat, cols["age"]]
-        te_age = patients_df.loc[mask_pat, cols["age"]]
+        tr_age = patients_df.loc[~mask_split_pat, cols["age"]]
+        te_age = patients_df.loc[mask_split_pat, cols["age"]]
         if SCIPY_AVAILABLE:
             a = pd.to_numeric(tr_age, errors="coerce").dropna()
             b = pd.to_numeric(te_age, errors="coerce").dropna()
@@ -989,14 +1011,18 @@ def main():
         else:
             stats_tests["age_ks"] = {"stat": None, "p": None, "note": "SciPy not installed"}
 
-    # Helper: chi2 on patient-level categorical columns
-    def chi2_on_patients(colname: str, label: str):
+    def chi2_on_patients(colname: str):
         if colname not in patients_df.columns:
             return { "stat": None, "p": None, "note": "Column missing" }
-        is_test_pat = patients_split_df["split"].values == "Test"
-        mask_pat = pd.Series(is_test_pat, index=patients_df.index)
-        a = patients_df.loc[~mask_pat, colname].astype(str)
-        b = patients_df.loc[mask_pat, colname].astype(str)
+        a = patients_df.loc[~mask_split_pat, colname].astype(str)
+        b = patients_df.loc[mask_split_pat, colname].astype(str)
+        # Drop 'Unknown' when testing Stulberg
+        try:
+            if colname == cols.get("stulberg"):
+                a = a[a.str.upper() != 'UNKNOWN']
+                b = b[b.str.upper() != 'UNKNOWN']
+        except Exception:
+            pass
         if not SCIPY_AVAILABLE:
             return {"stat": None, "p": None, "note": "SciPy not installed"}
         cats = sorted(set(a.unique()).union(set(b.unique())))
@@ -1008,24 +1034,24 @@ def main():
         except Exception:
             return {"stat": None, "p": None, "note": "Chi-square failed (sparse)"}
 
-    # Patient-level χ² for gender/race/affected/stulberg
     for var in ["gender","race","affected","stulberg"]:
         col = cols.get(var)
         if col:
-            stats_tests[f"{var}_chi2"] = chi2_on_patients(col, var)
+            stats_tests[f"{var}_chi2"] = chi2_on_patients(col)
 
-    # Image-level Waldenström χ²
-    stats_tests["waldenstrom_raw_images_chi2"] = {
-        "stat": raw_chi2.get("stat"),
-        "p":    raw_chi2.get("p"),
-        "note": raw_chi2.get("note", "")
+    # Image-level χ² results
+    stats_tests["waldenstrom_raw_images_chi2"] = {"stat": raw_chi2.get("stat"), "p": raw_chi2.get("p"), "note": raw_chi2.get("note","")}
+    stats_tests["stulberg_images_chi2"] = {"stat": stul_img_chi2.get("stat"), "p": stul_img_chi2.get("p"), "note": stul_img_chi2.get("note","")}
+
+    # Subset summaries into stats (patients/images)
+    stats_tests["subset_wald_iib_iia_counts"] = {
+        "stat": None,
+        "p": None,
+        "note": f"Patients — Train/Val: {n_pat_train}, Test: {n_pat_test} | Radiographs — Train/Val: {n_img_train}, Test: {n_img_test}"
     }
-
-    # IIb/IIIa subset LP χ² (patient-level)
-    stats_tests["wald_iib_iiia_lateral_pillar_chi2"] = {
-        "stat": subset_stats["chi2"].get("stat"),
-        "p":    subset_stats["chi2"].get("p"),
-        "note": subset_stats["chi2"].get("note","")
+    # LP χ² informational
+    stats_tests["subset_wald_iib_iia_lateral_pillar_chi2"] = {
+        "stat": subset_lp_chi2.get("stat"), "p": subset_lp_chi2.get("p"), "note": subset_lp_chi2.get("note","")
     }
 
     # ==============
@@ -1042,19 +1068,16 @@ def main():
                 "test_fraction_patients",
                 "target_test_fraction_patients",
                 "size_deviation_patients",
-
                 "train_val_images_n",
                 "test_images_n",
                 "test_fraction_images",
                 "target_test_fraction_images",
                 "size_deviation_images",
-
                 "test_institutions_n",
                 "total_institutions_n",
                 "test_fraction_institutions",
                 "target_test_fraction_institutions",
                 "institution_fraction_deviation",
-
                 "objective_score",
             ],
             "value": [
@@ -1064,19 +1087,16 @@ def main():
                 best_metrics["test_fraction_patients"],
                 args.target_test_frac,
                 best_metrics["size_deviation_patients"],
-
                 best_metrics["n_train_images"],
                 best_metrics["n_test_images"],
                 best_metrics["test_fraction_images"],
                 args.target_test_img_frac,
                 best_metrics["size_deviation_images"],
-
                 best_metrics["n_test_institutions"],
                 best_metrics["n_total_institutions"],
                 best_metrics["test_fraction_institutions"],
                 args.target_test_inst_frac,
                 best_metrics["inst_deviation"],
-
                 best_metrics["total_score"],
             ]
         }).to_excel(writer, index=False, sheet_name="00_summary")
@@ -1086,7 +1106,7 @@ def main():
             [{"dimension": k, "l1_distance": v} for k,v in best_metrics["per_dimension_l1"].items()]
         ).to_excel(writer, index=False, sheet_name="01_l1_distances")
 
-        # 02) STATS TESTS (reinstated)
+        # 02) STATS TESTS (includes subset counts summary)
         pd.DataFrame(
             [{"test": k, "stat": v.get("stat"), "p": v.get("p"), "note": v.get("note","")}
              for k,v in stats_tests.items()]
@@ -1096,7 +1116,6 @@ def main():
         per_institution_summary_from_arrays(inst_list, inst_stats, cat_meta).to_excel(writer, index=False, sheet_name="03_institution_summary")
 
         # 04) Distributions table
-        # Note: waldenstrom_raw here is IMAGE-LEVEL; label it explicitly
         dist_rows = []
         # Age (patient)
         if age_bins_edges is not None and totals["age"] is not None and best_state.test_age is not None:
@@ -1107,8 +1126,7 @@ def main():
                 for cat_label, cnt in zip(labels_age, arr):
                     dist_rows.append({"variable": "age (patients)", "category": cat_label,
                                       "count": int(cnt), "prop": float(cnt/T), "split": label})
-
-        # Patient-level categoricals
+        # Patient-level categoricals (including Stulberg from stulberg_stage)
         for var, nice in [("gender","gender (patients)"),
                           ("race","ethnicity (patients)"),
                           ("affected","affected (patients)"),
@@ -1122,7 +1140,6 @@ def main():
                 T = arr.sum() if arr.sum()>0 else 1
                 for cat, cnt in zip(cats, arr):
                     dist_rows.append({"variable": nice, "category": cat, "count": int(cnt), "prop": float(cnt/T), "split": label})
-
         # IMAGE-level waldenström
         meta_w = cat_meta["waldenstrom_raw"]
         if meta_w is not None:
@@ -1134,30 +1151,52 @@ def main():
                     for cat, cnt in zip(cats, arr):
                         dist_rows.append({"variable": "waldenstrom_raw (images)", "category": cat,
                                           "count": int(cnt), "prop": float(cnt/T), "split": label})
+        # IMAGE-level Stulberg (I..V)
+        if cols.get("stulberg") in df_all.columns:
+            df_tmp = df_all.copy()
+            df_tmp["__split__"] = df_tmp[cols["institution"]].apply(lambda x: "Test" if x in test_insts else "Train/Val")
+            df_tmp["__stulberg_img_norm__"] = df_tmp[cols["stulberg"]].apply(normalize_stulberg)
+            mask_known_tmp = df_tmp["__stulberg_img_norm__"] != "Unknown"
+            st_tr = df_tmp.loc[(df_tmp["__split__"]=="Train/Val") & mask_known_tmp, "__stulberg_img_norm__"].value_counts().sort_index()
+            st_te = df_tmp.loc[(df_tmp["__split__"]=="Test") & mask_known_tmp, "__stulberg_img_norm__"].value_counts().sort_index()
+            cats_st = sorted(set(st_tr.index).union(set(st_te.index)))
+            tr_s = pd.Series(0, index=cats_st); tr_s.update(st_tr)
+            te_s = pd.Series(0, index=cats_st); te_s.update(st_te)
+            for label, arr in [("Train/Val", tr_s), ("Test", te_s)]:
+                T = arr.sum() if arr.sum()>0 else 1
+                for cat in cats_st:
+                    dist_rows.append({"variable": "stulberg (images)", "category": cat,
+                                      "count": int(arr[cat]), "prop": float(arr[cat]/T), "split": label})
         pd.DataFrame(dist_rows).to_excel(writer, index=False, sheet_name="04_distributions")
 
-        # 05) Assignments & 06) Patients & 07) Audit
+        # 05..07
         assign_df.to_excel(writer, index=False, sheet_name="05_split_assignment_institutions")
         patients_split_df.to_excel(writer, index=False, sheet_name="06_patients_with_split")
         audit_df.to_excel(writer, index=False, sheet_name="07_patient_dedupe_audit")
 
-        # 08) Waldenström split (images)
+        # 08) Waldenström (images)
         pd.read_csv(raw_out_csv).to_excel(writer, index=False, sheet_name="08_waldenstrom_raw_images")
 
-        # 09) IIb/IIIa subset (patients)
-        if os.path.exists(subset_csv):
-            df_sub = pd.read_csv(subset_csv)
-            extra = pd.DataFrame([{
-                "split": "STATS",
-                "waldenstrom_raw_subset": ",".join(sorted(subset_targets_norm)),
-                "lateral_pillar": "chi2",
-                "count": subset_stats["chi2"]["stat"],
-                "prop": subset_stats["chi2"]["p"]
-            }])
-            pd.concat([df_sub, extra], ignore_index=True).to_excel(writer, index=False,
-                                                                   sheet_name="09_subset_Wald_IIb_IIIa_with_LP")
-        else:
-            pd.DataFrame({"note": ["Subset analysis not available (missing raw waldenstrom_stage)"]}).to_excel(writer, index=False, sheet_name="09_subset_Wald_IIb_IIIa_with_LP")
+        # 09) Subset IIb & IIa — summary (patients + radiographs) + optional LP distribution
+        subset_summary = pd.DataFrame([
+            {"split": "Train/Val", "patients": n_pat_train, "radiographs": n_img_train},
+            {"split": "Test",      "patients": n_pat_test,  "radiographs": n_img_test },
+        ])
+        subset_summary.to_excel(writer, index=False, sheet_name="09_subset_Wald_IIb_IIa")
+
+        # Optional LP distribution sheet (patient-level)
+        lp_rows = []
+        for label, arr in [("Train/Val", tr2), ("Test", te2)]:
+            T = int(arr.sum()) if arr.sum()>0 else 1
+            for cat in cats_lp:
+                lp_rows.append({"split": label, "lateral_pillar": cat, "count": int(arr[cat]), "prop": float(arr[cat]/T)})
+        subset_lp_df = pd.DataFrame(lp_rows)
+        if not subset_lp_df.empty:
+            subset_lp_df.to_excel(writer, index=False, sheet_name="09_subset_Wald_IIb_IIa_LP")
+
+        # 10) Stulberg (images)
+        if not df_stul_img.empty:
+            df_stul_img.to_excel(writer, index=False, sheet_name="10_stulberg_images")
 
     # JSON summary
     with open(os.path.join(args.output, "split_result_summary.json"), "w") as f:
@@ -1165,11 +1204,15 @@ def main():
             "test_institutions": sorted(list(test_insts)),
             "metrics": best_metrics,
             "scipy_available": SCIPY_AVAILABLE,
+            "subset_wald_stages": sorted(list(subset_targets_norm)),
+            "subset_counts": {"patients_train": n_pat_train, "patients_test": n_pat_test,
+                               "images_train": n_img_train, "images_test": n_img_test},
             "timestamp": ts
         }, f, indent=2)
 
     print(f"\nSaved outputs in: {args.output}")
     print("Done.")
+
 
 if __name__ == "__main__":
     main()
