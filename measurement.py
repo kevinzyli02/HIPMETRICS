@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 from abc import ABC, abstractmethod
+from scipy.spatial import cKDTree
 
 
 class BaseMeasurement(ABC):
@@ -286,45 +287,140 @@ class DIMeasurement(BaseMeasurement):
 
         return top, bottom, left, right
 
+    @staticmethod
+    def _extract_contour_points(mask, subsample_ratio=0.25):
+        """Extract evenly-spaced contour points from a binary mask."""
+        mask_uint8 = (mask.astype(np.uint8) * 255)
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            return None
+        contour = max(contours, key=cv2.contourArea).squeeze()
+        if contour.ndim == 1:
+            contour = contour.reshape(1, 2)
+        n = max(3, int(len(contour) * subsample_ratio))
+        step = max(1, len(contour) // n)
+        return contour[::step].astype(float)
+
+    @staticmethod
+    def icp_align(source_mask, target_mask, subsample_ratio=0.25, max_iter=50,
+                  tol=1e-4, max_rotation_deg=20):
+        """
+        Align source_mask to target_mask using ICP on contour point clouds.
+
+        Uses 25% random point subsampling (per the paper) and caps cumulative rotation
+        at max_rotation_deg to prevent runaway alignment on already-oriented masks.
+
+        Returns (R, t, error): 2x2 rotation matrix, 2D translation, mean registration error.
+        """
+        source_pts = DIMeasurement._extract_contour_points(source_mask, subsample_ratio)
+        target_pts = DIMeasurement._extract_contour_points(target_mask, subsample_ratio)
+
+        if source_pts is None or target_pts is None or len(source_pts) < 3 or len(target_pts) < 3:
+            print("ICP: insufficient contour points, returning identity transform")
+            return np.eye(2), np.zeros(2), float('nan')
+
+        tree = cKDTree(target_pts)
+        R_total = np.eye(2)
+        t_total = np.zeros(2)
+        src = source_pts.copy()
+        prev_error = float('inf')
+
+        for _ in range(max_iter):
+            distances, indices = tree.query(src)
+            matched_target = target_pts[indices]
+
+            src_centroid = src.mean(axis=0)
+            tgt_centroid = matched_target.mean(axis=0)
+
+            H_mat = (src - src_centroid).T @ (matched_target - tgt_centroid)
+            U, _, Vt = np.linalg.svd(H_mat)
+            R = Vt.T @ U.T
+
+            # Ensure proper rotation (det = +1, not a reflection)
+            if np.linalg.det(R) < 0:
+                Vt[-1, :] *= -1
+                R = Vt.T @ U.T
+
+            # Clamp cumulative rotation to max_rotation_deg
+            candidate_R = R @ R_total
+            total_angle = np.degrees(np.arctan2(candidate_R[1, 0], candidate_R[0, 0]))
+            if abs(total_angle) > max_rotation_deg:
+                R = np.eye(2)
+
+            t = tgt_centroid - R @ src_centroid
+            src = (R @ src.T).T + t
+            R_total = R @ R_total
+            t_total = R @ t_total + t
+
+            error = distances.mean()
+            if abs(prev_error - error) < tol:
+                break
+            prev_error = error
+
+        final_distances, _ = tree.query(src)
+        return R_total, t_total, float(final_distances.mean())
+
+    @staticmethod
+    def _apply_rigid_transform_to_mask(mask, R, t):
+        """
+        Apply a 2D rigid transform (R, t) to a binary mask image.
+        Pixels at source position p are mapped to R @ p + t in the output.
+        """
+        H, W = mask.shape
+        M = np.hstack([R, t.reshape(2, 1)]).astype(np.float64)
+        aligned = cv2.warpAffine(mask.astype(np.uint8), M, (W, H), flags=cv2.INTER_NEAREST)
+        return aligned.astype(bool)
+
     def calculate(self):
-        # Get masks and laterality
         affected_mask = self.data['affected_mask']
         transformed_unaff_mask = self.data['transformed_unaff_mask']
         affected_laterality = self.data['affected_laterality']
         unaff_width = self.analyzer.eq_measurements['unaff_width']
 
-        # Find landmarks
-        aff_landmark = self.find_landmark(affected_mask, affected_laterality)
-        unaff_landmark = self.find_landmark(transformed_unaff_mask, affected_laterality)
+        # ICP-based alignment: refine the upstream major-axis alignment
+        icp_error = float('nan')
+        icp_success = False
+        try:
+            R, t, icp_error = self.icp_align(transformed_unaff_mask, affected_mask)
+            icp_aligned = self._apply_rigid_transform_to_mask(transformed_unaff_mask, R, t)
+            if icp_aligned.sum() >= 0.5 * transformed_unaff_mask.sum():
+                icp_success = True
+            else:
+                print("ICP: aligned mask too sparse, falling back to landmark alignment")
+        except Exception as e:
+            print(f"ICP alignment failed ({e}), using landmark-based fallback")
 
-        # Calculate integer shift
-        dx = int(round(aff_landmark[0] - unaff_landmark[0]))
-        dy = int(round(aff_landmark[1] - unaff_landmark[1]))
-        H, W = affected_mask.shape
-
-        # Create padded canvas to accommodate shifts
-        min_x = min(0, dx)
-        max_x = max(W - 1, dx + W - 1)
-        min_y = min(0, dy)
-        max_y = max(H - 1, dy + H - 1)
-        new_width = max_x - min_x + 1
-        new_height = max_y - min_y + 1
-
-        aff_padded = np.zeros((new_height, new_width), dtype=bool)
-        unaff_padded = np.zeros((new_height, new_width), dtype=bool)
-
-        # Place masks in padded canvas
-        aff_padded[-min_y: -min_y + H, -min_x: -min_x + W] = affected_mask
-        unaff_padded[dy - min_y: dy - min_y + H, dx - min_x: dx - min_x + W] = transformed_unaff_mask
+        if icp_success:
+            aff_padded = affected_mask.copy()
+            unaff_padded = icp_aligned
+        else:
+            # Fallback: original landmark-based translation with padded canvas
+            aff_landmark = self.find_landmark(affected_mask, affected_laterality)
+            unaff_landmark = self.find_landmark(transformed_unaff_mask, affected_laterality)
+            dx = int(round(aff_landmark[0] - unaff_landmark[0]))
+            dy = int(round(aff_landmark[1] - unaff_landmark[1]))
+            H_orig, W_orig = affected_mask.shape
+            min_x = min(0, dx)
+            max_x = max(W_orig - 1, dx + W_orig - 1)
+            min_y = min(0, dy)
+            max_y = max(H_orig - 1, dy + H_orig - 1)
+            new_width = max_x - min_x + 1
+            new_height = max_y - min_y + 1
+            aff_padded = np.zeros((new_height, new_width), dtype=bool)
+            unaff_padded = np.zeros((new_height, new_width), dtype=bool)
+            aff_padded[-min_y:-min_y + H_orig, -min_x:-min_x + W_orig] = affected_mask
+            unaff_padded[dy - min_y:dy - min_y + H_orig, dx - min_x:dx - min_x + W_orig] = transformed_unaff_mask
 
         # Compute boundary profiles
         top_aff, bottom_aff, left_aff, right_aff = self.compute_boundaries(aff_padded)
         top_unaff, bottom_unaff, left_unaff, right_unaff = self.compute_boundaries(unaff_padded)
 
+        canvas_h, canvas_w = aff_padded.shape
+
         # Calculate max height difference (ΔH)
         max_diff_top = 0
         max_diff_bottom = 0
-        for x in range(new_width):
+        for x in range(canvas_w):
             if top_aff[x] != -1 and top_unaff[x] != -1:
                 diff = abs(top_aff[x] - top_unaff[x])
                 max_diff_top = max(max_diff_top, diff)
@@ -333,10 +429,10 @@ class DIMeasurement(BaseMeasurement):
                 max_diff_bottom = max(max_diff_bottom, diff)
         deltaH = max(max_diff_top, max_diff_bottom)
 
-        # Calculate max width difference
+        # Calculate max width difference (ΔW)
         max_diff_left = 0
         max_diff_right = 0
-        for y in range(new_height):
+        for y in range(canvas_h):
             if left_aff[y] != -1 and left_unaff[y] != -1:
                 diff = abs(left_aff[y] - left_unaff[y])
                 max_diff_left = max(max_diff_left, diff)
@@ -354,4 +450,5 @@ class DIMeasurement(BaseMeasurement):
             'unaff_diameter': unaff_width,
             'aff_padded': aff_padded,
             'unaff_padded': unaff_padded,
+            'icp_registration_error': icp_error,
         }

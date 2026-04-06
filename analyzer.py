@@ -175,6 +175,7 @@ class FemoralHeadAnalyzer:
             'deltaH': self.di_measurements.get('deltaH', None),
             'deltaW': self.di_measurements.get('deltaW', None),
             'unaff_diameter': self.di_measurements.get('unaff_diameter', None),
+            'icp_registration_error': self.di_measurements.get('icp_registration_error', None),
            # 'com_affected':
            # 'major_axis_affected':self.
             #'minor_axis_affected':

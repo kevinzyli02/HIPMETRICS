@@ -145,12 +145,15 @@ class MeasurementVisualizer:
         ax.scatter(unaff_landmark[0], unaff_landmark[1], s=80, c='lime', marker='o', edgecolor='white')
 
         # Title with measurements
+        icp_err = di_data.get('icp_registration_error', float('nan'))
+        icp_txt = f"{icp_err:.2f}px" if icp_err == icp_err else "fallback"  # nan check
         title = (
             f"Patient {self.data['patient_id']} - {self.data['timepoint']}\n"
             f"DI: {di_data.get('deformity_index', float('nan')):.2f}, "
             f"ΔH: {di_data.get('deltaH', float('nan')):.1f}, "
             f"ΔW: {di_data.get('deltaW', float('nan')):.1f}, "
-            f"Unaff Diam: {di_data.get('unaff_diameter', float('nan')):.1f}"
+            f"Unaff Diam: {di_data.get('unaff_diameter', float('nan')):.1f}, "
+            f"ICP err: {icp_txt}"
         )
         ax.set_title(title, fontsize=12)
         ax.axis('off')
