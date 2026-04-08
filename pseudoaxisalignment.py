@@ -231,11 +231,21 @@ def find_femoral_head_pairs(coco_json_path, max_pairs=None):
     if 'head' not in cat_name_to_id:
         raise ValueError("Category 'head' not found")
     head_cat_id = cat_name_to_id['head']
+    # Neck may be labelled 'neck', 'femoral_neck', or derived from 'wholeshaft'.
+    neck_cat_id = (
+        cat_name_to_id.get('neck')
+        or cat_name_to_id.get('femoral_neck')
+        or cat_name_to_id.get('wholeshaft')
+    )
 
     # Create image ID to image mapping
     image_id_to_info = {img['id']: img for img in coco['images']}
 
-    # Group annotations by image
+    # Group head annotations by image; also index all annotations for neck look-up
+    all_image_annotations = {}
+    for ann in coco['annotations']:
+        all_image_annotations.setdefault(ann['image_id'], []).append(ann)
+
     image_annotations = {}
     for ann in coco['annotations']:
         if ann['category_id'] == head_cat_id:
@@ -243,6 +253,15 @@ def find_femoral_head_pairs(coco_json_path, max_pairs=None):
             image_annotations.setdefault(img_id, []).append(ann)
 
     # Find femoral head pairs with limit
+    def _first_neck(iid):
+        """Return the first neck-category annotation for image iid, or None."""
+        if neck_cat_id is None:
+            return None
+        for a in all_image_annotations.get(iid, []):
+            if a['category_id'] == neck_cat_id:
+                return a
+        return None
+
     pairs = []
     processed_pairs = set()
     for img_id, anns in image_annotations.items():
@@ -287,7 +306,9 @@ def find_femoral_head_pairs(coco_json_path, max_pairs=None):
                     'left_img': other_info if laterality == 'L' else img_info,
                     'right_img': img_info if laterality == 'L' else other_info,
                     'left_ann': other_anns[0] if laterality == 'L' else anns[0],
-                    'right_ann': anns[0] if laterality == 'L' else other_anns[0]
+                    'right_ann': anns[0] if laterality == 'L' else other_anns[0],
+                    'left_neck_ann': _first_neck(other_id if laterality == 'L' else img_id),
+                    'right_neck_ann': _first_neck(img_id if laterality == 'L' else other_id),
                 })
                 processed_pairs.add(pair_key)
                 break
@@ -305,13 +326,34 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
     '''
     # Create head dictionaries
     heads = []
-    for img_key, ann_key in [('left_img', 'left_ann'), ('right_img', 'right_ann')]:
+    for img_key, ann_key, neck_ann_key in [
+        ('left_img',  'left_ann',  'left_neck_ann'),
+        ('right_img', 'right_ann', 'right_neck_ann'),
+    ]:
         img_info = pair[img_key]
         ann = pair[ann_key]
         width = img_info['width']
         height = img_info['height']
         poly = ann['segmentation'][0]
         mask = poly_to_mask(poly, width, height)
+
+        # Build neck mask from the paired neck annotation (wholeshaft or explicit neck).
+        # Neck region = wholeshaft pixels that are NOT the head, restricted to the
+        # vertical band spanning from the head top down to head_height * 1.7 below it.
+        neck_ann = pair.get(neck_ann_key)
+        neck_mask = None
+        if neck_ann is not None:
+            raw_neck = poly_to_mask(neck_ann['segmentation'][0], width, height)
+            head_ys = np.where(mask)[0]
+            if head_ys.size > 0:
+                head_top  = int(head_ys.min())
+                head_bot  = int(head_ys.max())
+                neck_bot  = int(head_bot + (head_bot - head_top) * 0.7)
+                region    = raw_neck.copy()
+                region[:head_top, :] = False
+                region[neck_bot:,  :] = False
+                region[mask]          = False   # exclude head pixels
+                neck_mask = region if region.any() else None
 
         # Skip if mask is empty
         if np.sum(mask) == 0:
@@ -338,19 +380,20 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
         heads.append({
             'image_info': img_info,
             'mask': mask,
+            'neck_mask': neck_mask,
             'center_xy': center_xy,
             'u_major': u_major,
             'ratio': minor_length / max(major_length, 1e-5),
             'laterality': img_info['file_name'].split('_')[-1].split('.')[0],
             'com': com,
             'original_mask': mask.copy(),
+            'original_neck_mask': neck_mask.copy() if neck_mask is not None else None,
             'original_center_xy': center_xy.copy(),
             'original_u_major': u_major.copy(),
             'original_com': com.copy(),
             'major_axis_ends': major_ends,
             'minor_axis_ends': minor_ends,
             'major_length': float(major_length),
-            # NEW: max-height (perp to major axis)
             'max_height_line': (h_top, h_bottom),
             'max_height_length': float(h_len),
         })
@@ -401,6 +444,9 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
     else:
         R, com_trans, orientation = R180, com180, "180°"
 
+    # Flip the unaffected neck mask (if present) the same way as the head mask
+    flipped_neck = np.fliplr(unaffected['original_neck_mask']) if unaffected['original_neck_mask'] is not None else None
+
     # Transform mask using affine transformation
     aff_h, aff_w = affected['image_info']['height'], affected['image_info']['width']
     yy, xx = np.mgrid[:aff_h, :aff_w]
@@ -411,13 +457,15 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
     rot_coords = (R.T @ (rel_coords).T).T + flipped_center
     trans_coords = rot_coords.reshape(aff_h, aff_w, 2)
 
-    # Sample from flipped mask
+    # Sample from flipped head mask
     sample_x = trans_coords[..., 0].clip(0, w - 1)
     sample_y = trans_coords[..., 1].clip(0, h - 1)
-    transformed_unaff_mask = flipped_mask[
-        sample_y.astype(int),
-        sample_x.astype(int)
-    ]
+    si = sample_y.astype(int)
+    sj = sample_x.astype(int)
+    transformed_unaff_mask = flipped_mask[si, sj]
+
+    # Sample from flipped neck mask using the same coordinate map
+    transformed_unaff_neck_mask = flipped_neck[si, sj] if flipped_neck is not None else None
 
     # Transform major axis endpoints
     trans_major_end1 = R @ (flipped_major_ends[0] - flipped_center) + affected['center_xy']
@@ -435,7 +483,9 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
         'patient_id': pair['patient_id'],
         'timepoint': pair['timepoint'],
         'affected_mask': affected['original_mask'],
+        'affected_neck_mask': affected['original_neck_mask'],
         'transformed_unaff_mask': transformed_unaff_mask,
+        'transformed_unaff_neck_mask': transformed_unaff_neck_mask,
         'unaffected_original_mask': unaffected['original_mask'],
         'dist': min(dist0, dist180),
         'orientation': orientation,
@@ -455,7 +505,7 @@ def process_femoral_head_pair(pair, coco_data, image_folder, visualize=False, ou
         # Lengths
         'aff_major_length': affected.get('major_length', 0.0),
         'unaff_major_length': unaffected.get('major_length', 0.0),
-        # NEW: affected greatest-height line ⟂ major axis
+        # Affected greatest-height line ⟂ major axis
         'aff_max_height_line': affected.get('max_height_line', (None, None)),
         'aff_max_height_length': affected.get('max_height_length', 0.0),
     }

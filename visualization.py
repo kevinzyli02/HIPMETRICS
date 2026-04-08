@@ -144,16 +144,25 @@ class MeasurementVisualizer:
         ax.scatter(aff_landmark[0], aff_landmark[1], s=80, c='red', marker='o', edgecolor='white')
         ax.scatter(unaff_landmark[0], unaff_landmark[1], s=80, c='lime', marker='o', edgecolor='white')
 
+        # Optionally draw neck mask outlines when available
+        aff_neck  = self.data.get('affected_neck_mask')
+        unaff_neck = self.data.get('transformed_unaff_neck_mask')
+        if aff_neck is not None and aff_neck.any():
+            self._draw_mask_outline(ax, aff_neck, 'salmon')
+        if unaff_neck is not None and unaff_neck.any():
+            self._draw_mask_outline(ax, unaff_neck, 'lightgreen')
+
         # Title with measurements
         icp_err = di_data.get('icp_registration_error', float('nan'))
         icp_txt = f"{icp_err:.2f}px" if icp_err == icp_err else "fallback"  # nan check
+        mode_txt = di_data.get('alignment_mode', 'head_only_icp')
         title = (
             f"Patient {self.data['patient_id']} - {self.data['timepoint']}\n"
             f"DI: {di_data.get('deformity_index', float('nan')):.2f}, "
             f"ΔH: {di_data.get('deltaH', float('nan')):.1f}, "
             f"ΔW: {di_data.get('deltaW', float('nan')):.1f}, "
             f"Unaff Diam: {di_data.get('unaff_diameter', float('nan')):.1f}, "
-            f"ICP err: {icp_txt}"
+            f"ICP err: {icp_txt}, Mode: {mode_txt}"
         )
         ax.set_title(title, fontsize=12)
         ax.axis('off')
