@@ -626,6 +626,242 @@ def process_all_femoral_heads(coco_json_path, image_folder, output_folder=None,
     return results
 
 
+def find_femoral_head_pairs_bmp(image_folder):
+    '''
+    Identifies matching L/R femoral head pairs from BMP image files in a folder.
+    Expects filenames of the form: Patient_{ID}_{VIEW}_{T1}_{T2}_{LAT}.bmp
+    '''
+    image_folder = Path(image_folder)
+    file_data = {}
+    for bmp_file in sorted(image_folder.glob('*.bmp')):
+        parts = bmp_file.stem.split('_')
+        if len(parts) < 6:
+            continue
+        patient_id = parts[1]
+        timepoint = '_'.join(parts[3:5])
+        laterality = parts[5]
+        if laterality not in ('L', 'R'):
+            continue
+        file_data.setdefault((patient_id, timepoint), {})[laterality] = bmp_file.name
+
+    pairs = []
+    for (patient_id, timepoint), sides in file_data.items():
+        if 'L' in sides and 'R' in sides:
+            pairs.append({
+                'patient_id': patient_id,
+                'timepoint': timepoint,
+                'left_filename': sides['L'],
+                'right_filename': sides['R'],
+            })
+    return pairs
+
+
+def process_femoral_head_pair_bmp(pair, image_folder, visualize=False, output_folder=None):
+    '''
+    Processes a femoral head pair whose masks are stored as BMP files.
+    pair: dict with keys patient_id, timepoint, left_filename, right_filename.
+    Masks are read from {image_folder}/masks/head/ and {image_folder}/masks/neck/.
+    '''
+    image_folder = Path(image_folder)
+    masks_head_dir = image_folder / 'masks' / 'head'
+    masks_neck_dir = image_folder / 'masks' / 'neck'
+
+    heads = []
+    for filename_key, laterality in [('left_filename', 'L'), ('right_filename', 'R')]:
+        filename = pair[filename_key]
+
+        # Load head mask
+        head_mask_path = masks_head_dir / filename
+        if not head_mask_path.exists():
+            print(f"Head mask not found: {head_mask_path}")
+            return None
+        mask = np.array(Image.open(head_mask_path), dtype=bool)
+        height, width = mask.shape
+
+        # Load neck mask and apply vertical clipping (same logic as COCO path)
+        neck_mask = None
+        neck_mask_path = masks_neck_dir / filename
+        if neck_mask_path.exists():
+            raw_neck = np.array(Image.open(neck_mask_path), dtype=bool)
+            head_ys = np.where(mask)[0]
+            if head_ys.size > 0:
+                head_top = int(head_ys.min())
+                head_bot = int(head_ys.max())
+                neck_bot = int(head_bot + (head_bot - head_top) * 0.7)
+                region = raw_neck.copy()
+                region[:head_top, :] = False
+                region[neck_bot:, :] = False
+                region[mask] = False
+                neck_mask = region if region.any() else None
+
+        if not np.any(mask):
+            print(f"Empty head mask: {filename}")
+            return None
+
+        img_info = {'file_name': filename, 'width': width, 'height': height}
+
+        axis_data = get_major_minor_axis(mask)
+        if any(d is None for d in axis_data):
+            print(f"Failed to calculate axis for {filename}")
+            return None
+        center_xy, u_major, minor_length, major_length, major_ends, minor_ends = axis_data
+
+        com = get_center_of_mass(mask)
+        if com is None:
+            print(f"Failed to get COM for {filename}")
+            return None
+
+        h_top, h_bottom, h_len = compute_max_height_perp_major(mask, center_xy, u_major)
+
+        heads.append({
+            'image_info': img_info,
+            'mask': mask,
+            'neck_mask': neck_mask,
+            'center_xy': center_xy,
+            'u_major': u_major,
+            'ratio': minor_length / max(major_length, 1e-5),
+            'laterality': laterality,
+            'com': com,
+            'original_mask': mask.copy(),
+            'original_neck_mask': neck_mask.copy() if neck_mask is not None else None,
+            'original_center_xy': center_xy.copy(),
+            'original_u_major': u_major.copy(),
+            'original_com': com.copy(),
+            'major_axis_ends': major_ends,
+            'minor_axis_ends': minor_ends,
+            'major_length': float(major_length),
+            'max_height_line': (h_top, h_bottom),
+            'max_height_length': float(h_len),
+        })
+
+    # Identify affected (lower ratio = more deformed) and unaffected
+    if heads[0]['ratio'] > heads[1]['ratio']:
+        unaffected, affected = heads[0], heads[1]
+    else:
+        unaffected, affected = heads[1], heads[0]
+
+    # Flip unaffected head horizontally for alignment
+    w = unaffected['image_info']['width']
+    h = unaffected['image_info']['height']
+    flipped_mask = np.fliplr(unaffected['original_mask'])
+    flipped_center = np.array([w - unaffected['original_center_xy'][0], unaffected['original_center_xy'][1]])
+    flipped_com = np.array([w - unaffected['original_com'][0], unaffected['original_com'][1]])
+    flipped_u_major = np.array([-unaffected['original_u_major'][0], unaffected['original_u_major'][1]])
+    flipped_major_ends = (
+        np.array([w - unaffected['major_axis_ends'][0][0], unaffected['major_axis_ends'][0][1]]),
+        np.array([w - unaffected['major_axis_ends'][1][0], unaffected['major_axis_ends'][1][1]])
+    )
+    flipped_minor_ends = (
+        np.array([w - unaffected['minor_axis_ends'][0][0], unaffected['minor_axis_ends'][0][1]]),
+        np.array([w - unaffected['minor_axis_ends'][1][0], unaffected['minor_axis_ends'][1][1]])
+    )
+
+    # Calculate rotation to align unaffected onto affected
+    angle_aff = np.arctan2(affected['u_major'][1], affected['u_major'][0])
+    angle_unaff = np.arctan2(flipped_u_major[1], flipped_u_major[0])
+    theta = (angle_aff - angle_unaff + np.pi) % (2 * np.pi) - np.pi
+
+    R0 = np.array([[np.cos(theta), -np.sin(theta)],
+                   [np.sin(theta),  np.cos(theta)]])
+    R180 = np.array([[np.cos(theta + np.pi), -np.sin(theta + np.pi)],
+                     [np.sin(theta + np.pi),  np.cos(theta + np.pi)]])
+
+    offset = flipped_com - flipped_center
+    com0 = R0 @ offset + affected['center_xy']
+    com180 = R180 @ offset + affected['center_xy']
+    dist0 = np.linalg.norm(com0 - affected['com'])
+    dist180 = np.linalg.norm(com180 - affected['com'])
+
+    if dist0 <= dist180:
+        R, com_trans, orientation = R0, com0, "0°"
+    else:
+        R, com_trans, orientation = R180, com180, "180°"
+
+    flipped_neck = np.fliplr(unaffected['original_neck_mask']) if unaffected['original_neck_mask'] is not None else None
+
+    # Apply affine transform to warp unaffected mask onto affected coordinate space
+    aff_h, aff_w = affected['image_info']['height'], affected['image_info']['width']
+    yy, xx = np.mgrid[:aff_h, :aff_w]
+    coords = np.stack([xx, yy], axis=-1).reshape(-1, 2)
+    rel_coords = coords - affected['center_xy']
+    rot_coords = (R.T @ rel_coords.T).T + flipped_center
+    trans_coords = rot_coords.reshape(aff_h, aff_w, 2)
+
+    sample_x = trans_coords[..., 0].clip(0, w - 1)
+    sample_y = trans_coords[..., 1].clip(0, h - 1)
+    si = sample_y.astype(int)
+    sj = sample_x.astype(int)
+    transformed_unaff_mask = flipped_mask[si, sj]
+    transformed_unaff_neck_mask = flipped_neck[si, sj] if flipped_neck is not None else None
+
+    trans_major_end1 = R @ (flipped_major_ends[0] - flipped_center) + affected['center_xy']
+    trans_major_end2 = R @ (flipped_major_ends[1] - flipped_center) + affected['center_xy']
+    trans_minor_end1 = R @ (flipped_minor_ends[0] - flipped_center) + affected['center_xy']
+    trans_minor_end2 = R @ (flipped_minor_ends[1] - flipped_center) + affected['center_xy']
+
+    results = {
+        'patient_id': pair['patient_id'],
+        'timepoint': pair['timepoint'],
+        'affected_mask': affected['original_mask'],
+        'affected_neck_mask': affected['original_neck_mask'],
+        'transformed_unaff_mask': transformed_unaff_mask,
+        'transformed_unaff_neck_mask': transformed_unaff_neck_mask,
+        'unaffected_original_mask': unaffected['original_mask'],
+        'dist': min(dist0, dist180),
+        'orientation': orientation,
+        'com_aff': affected['original_com'],
+        'com_unaff_trans': com_trans,
+        'com_unaff_original': unaffected['original_com'],
+        'aff_img_info': affected['image_info'],
+        'unaff_img_info': unaffected['image_info'],
+        'affected_laterality': affected['laterality'],
+        'unaffected_laterality': unaffected['laterality'],
+        'aff_major_axis': affected['major_axis_ends'],
+        'unaff_major_axis': unaffected['major_axis_ends'],
+        'trans_unaff_major_axis': (trans_major_end1, trans_major_end2),
+        'aff_minor_axis': affected['minor_axis_ends'],
+        'trans_unaff_minor_axis': (trans_minor_end1, trans_minor_end2),
+        'aff_major_length': affected.get('major_length', 0.0),
+        'unaff_major_length': unaffected.get('major_length', 0.0),
+        'aff_max_height_line': affected.get('max_height_line', (None, None)),
+        'aff_max_height_length': affected.get('max_height_length', 0.0),
+    }
+
+    if visualize and output_folder:
+        viz_pair = {'patient_id': pair['patient_id'], 'timepoint': pair['timepoint']}
+        visualize_results(results, viz_pair, str(image_folder), output_folder)
+
+    return results
+
+
+def process_all_femoral_heads_bmp(image_folder, output_folder=None, visualize=False):
+    '''
+    Processes all femoral head pairs in a BMP-format dataset folder.
+    Scans image_folder for *.bmp files, finds L/R pairs, and runs the alignment
+    and measurement pipeline on each pair.
+    '''
+    pairs = find_femoral_head_pairs_bmp(image_folder)
+    print(f"Found {len(pairs)} femoral head pairs in {image_folder}")
+
+    results = []
+    total_pairs = len(pairs)
+    start_time = time.time()
+    for i, pair in enumerate(pairs):
+        pair_start = time.time()
+        res = process_femoral_head_pair_bmp(
+            pair, image_folder,
+            visualize=visualize,
+            output_folder=output_folder,
+        )
+        if res:
+            results.append(res)
+        elapsed = time.time() - pair_start
+        print(f"Processed {pair['patient_id']}-{pair['timepoint']} ({i + 1}/{total_pairs}) in {elapsed:.2f}s")
+    total_time = time.time() - start_time
+    print(f"Processed {len(results)} femoral head pairs in {total_time:.2f} seconds")
+    return results
+
+
 # Main execution
 if __name__ == "__main__":
     coco_json_path = r'C:\Users\SR207348\Downloads\labels_ipsg102_2025-06-30-08-40-52.json'
