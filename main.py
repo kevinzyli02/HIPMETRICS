@@ -2,32 +2,46 @@ import os
 import sys
 import pandas as pd
 import time
-from pseudoaxisalignment import process_all_femoral_heads
+from pseudoaxisalignment import process_all_femoral_heads, process_all_femoral_heads_bmp
 from analyzer import FemoralHeadAnalyzer
 
-# File Paths
-coco_json_path = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage\output.json'
-image_folder = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage'
-img_output_folder = r'Y:\Clinical Research\KIM\STUDENTS\Kevin Li\HIPMETRICS\TSRH_viz'
-# Get the root directory of your project (where the script is located)
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+# ── Data mode ─────────────────────────────────────────────────────────────────
+# 'bmp'  – BMP-mask dataset (images + masks/head/ + masks/neck/ subfolders)
+# 'coco' – COCO JSON-annotated dataset
+DATA_MODE = 'bmp'
 
-# Set the output directory to "Data Analysis" subfolder
+# ── BMP dataset paths ─────────────────────────────────────────────────────────
+bmp_image_folder = r'/Users/kevin/Library/CloudStorage/OneDrive-ScottishRiteforChildren/Kim Research/HIPMETRICS-lateral pillar/DI images/filtered_test'
+
+# ── COCO dataset paths ────────────────────────────────────────────────────────
+coco_json_path = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage\output.json'
+coco_image_folder = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage'
+
+# ── Output paths ──────────────────────────────────────────────────────────────
+img_output_folder = r'Y:\Clinical Research\KIM\STUDENTS\Kevin Li\HIPMETRICS\TSRH_viz'
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 excel_output = os.path.join(PROJECT_ROOT, "Data Analysis")
 
-# Ensure output directory exists
 os.makedirs(excel_output, exist_ok=True)
 os.makedirs(img_output_folder, exist_ok=True)
 
-# Align Hips - REMOVED max_pairs parameter to process all
-aligned_results = process_all_femoral_heads(
-    coco_json_path,
-    image_folder,
-    output_folder=img_output_folder,
-    visualize=False,
-    #max_pairs = 10
-
-)
+# ── Align hips ────────────────────────────────────────────────────────────────
+if DATA_MODE == 'bmp':
+    aligned_results = process_all_femoral_heads_bmp(
+        bmp_image_folder,
+        output_folder=img_output_folder,
+        visualize=False,
+    )
+    image_folder = bmp_image_folder
+else:
+    aligned_results = process_all_femoral_heads(
+        coco_json_path,
+        coco_image_folder,
+        output_folder=img_output_folder,
+        visualize=False,
+        # max_pairs=10
+    )
+    image_folder = coco_image_folder
 
 # Initialize results collector
 all_results = []
