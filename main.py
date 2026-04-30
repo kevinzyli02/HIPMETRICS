@@ -11,7 +11,7 @@ from analyzer import FemoralHeadAnalyzer
 DATA_MODE = 'bmp'
 
 # ── BMP dataset paths ─────────────────────────────────────────────────────────
-bmp_image_folder = r'/Users/kevin/Library/CloudStorage/OneDrive-ScottishRiteforChildren/Kim Research/HIPMETRICS-lateral pillar/DI images/filtered_test'
+bmp_image_folder = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Kim Research\HIPMETRICS-lateral pillar\DI images\filtered_test'
 
 # ── COCO dataset paths ────────────────────────────────────────────────────────
 coco_json_path = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage\output.json'
