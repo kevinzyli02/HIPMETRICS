@@ -629,19 +629,28 @@ def process_all_femoral_heads(coco_json_path, image_folder, output_folder=None,
 def find_femoral_head_pairs_bmp(image_folder):
     '''
     Identifies matching L/R femoral head pairs from BMP image files in a folder.
-    Expects filenames of the form: Patient_{ID}_{VIEW}_{T1}_{T2}_{LAT}.bmp
+    Expects filenames of the form: Patient_{ID}_{VIEW}_{TIMEPOINT...}_{LAT}[_unaffected].bmp
+    where TIMEPOINT may be a single token (e.g. "initial") or multiple tokens
+    (e.g. "6_month"). The laterality token ('L' or 'R') is located by scanning
+    rather than assumed to sit at a fixed index, so both naming styles work.
     '''
     image_folder = Path(image_folder)
     file_data = {}
     for bmp_file in sorted(image_folder.glob('*.bmp')):
         parts = bmp_file.stem.split('_')
-        if len(parts) < 6:
+        if len(parts) < 4:
             continue
         patient_id = parts[1]
-        timepoint = '_'.join(parts[3:5])
-        laterality = parts[5]
-        if laterality not in ('L', 'R'):
+        # Find the laterality token (first standalone 'L' or 'R' after the view token)
+        lat_idx = None
+        for idx in range(2, len(parts)):
+            if parts[idx] in ('L', 'R'):
+                lat_idx = idx
+                break
+        if lat_idx is None:
             continue
+        laterality = parts[lat_idx]
+        timepoint = '_'.join(parts[3:lat_idx])
         file_data.setdefault((patient_id, timepoint), {})[laterality] = bmp_file.name
 
     pairs = []
@@ -656,15 +665,21 @@ def find_femoral_head_pairs_bmp(image_folder):
     return pairs
 
 
-def process_femoral_head_pair_bmp(pair, image_folder, visualize=False, output_folder=None):
+def process_femoral_head_pair_bmp(pair, image_folder, visualize=False, output_folder=None,
+                                   mask_source='masks'):
     '''
     Processes a femoral head pair whose masks are stored as BMP files.
     pair: dict with keys patient_id, timepoint, left_filename, right_filename.
-    Masks are read from {image_folder}/masks/head/ and {image_folder}/masks/neck/.
+    Masks are read from {image_folder}/{mask_source}/head/ and
+    {image_folder}/{mask_source}/neck/.
+
+    mask_source: name of the subfolder holding the masks, e.g.:
+        'masks'        – hand-drawn (ground-truth) masks
+        'nnunet_masks' – machine-learning (nnU-Net) generated masks
     '''
     image_folder = Path(image_folder)
-    masks_head_dir = image_folder / 'masks' / 'head'
-    masks_neck_dir = image_folder / 'masks' / 'neck'
+    masks_head_dir = image_folder / mask_source / 'head'
+    masks_neck_dir = image_folder / mask_source / 'neck'
 
     heads = []
     for filename_key, laterality in [('left_filename', 'L'), ('right_filename', 'R')]:
@@ -834,11 +849,15 @@ def process_femoral_head_pair_bmp(pair, image_folder, visualize=False, output_fo
     return results
 
 
-def process_all_femoral_heads_bmp(image_folder, output_folder=None, visualize=False):
+def process_all_femoral_heads_bmp(image_folder, output_folder=None, visualize=False,
+                                   mask_source='masks'):
     '''
     Processes all femoral head pairs in a BMP-format dataset folder.
     Scans image_folder for *.bmp files, finds L/R pairs, and runs the alignment
     and measurement pipeline on each pair.
+
+    mask_source: name of the subfolder holding the masks ('masks' for hand-drawn
+        ground-truth masks, 'nnunet_masks' for machine-learning generated masks).
     '''
     pairs = find_femoral_head_pairs_bmp(image_folder)
     print(f"Found {len(pairs)} femoral head pairs in {image_folder}")
@@ -852,6 +871,7 @@ def process_all_femoral_heads_bmp(image_folder, output_folder=None, visualize=Fa
             pair, image_folder,
             visualize=visualize,
             output_folder=output_folder,
+            mask_source=mask_source,
         )
         if res:
             results.append(res)

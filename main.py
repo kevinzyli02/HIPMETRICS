@@ -10,15 +10,20 @@ from analyzer import FemoralHeadAnalyzer
 # 'coco' – COCO JSON-annotated dataset
 DATA_MODE = 'bmp'
 
+# ── Mask source (BMP mode only) ─────────────────────────────────────────────────
+# 'masks'        – hand-drawn (ground-truth) masks
+# 'nnunet_masks' – machine-learning (nnU-Net) generated masks
+MASK_SOURCE = 'masks'
+
 # ── BMP dataset paths ─────────────────────────────────────────────────────────
-bmp_image_folder = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Kim Research\HIPMETRICS-lateral pillar\DI images\filtered_test'
+bmp_image_folder = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Kim Research\HIPMETRICS-lateral pillar\fragmentation_stage_test_ap'
 
 # ── COCO dataset paths ────────────────────────────────────────────────────────
 coco_json_path = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage\output.json'
 coco_image_folder = r'\\wnresearch\Drobo\Vishal_Graham\ML Review\radiographs\FragmentationStage'
 
 # ── Output paths ──────────────────────────────────────────────────────────────
-img_output_folder = r'Y:\Clinical Research\KIM\STUDENTS\Kevin Li\HIPMETRICS\TSRH_viz'
+img_output_folder = r'C:\Users\SR207348\OneDrive - Scottish Rite for Children\Kim Research\HIPMETRICS-lateral pillar\Processsing Results'
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 excel_output = os.path.join(PROJECT_ROOT, "Data Analysis")
 
@@ -31,6 +36,7 @@ if DATA_MODE == 'bmp':
         bmp_image_folder,
         output_folder=img_output_folder,
         visualize=False,
+        mask_source=MASK_SOURCE,
     )
     image_folder = bmp_image_folder
 else:
